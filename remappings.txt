@@ -1,0 +1,6 @@
+@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
+@openzeppelin-upgradeable/contracts/=lib/openzeppelin-contracts-upgradeable/contracts/
+@solady/=lib/solady/src/
+forge-std/=lib/forge-std/src/
+account-abstraction-v7/=lib/account-abstraction-v7/
+account-abstraction-v8/=lib/account-abstraction-v8/

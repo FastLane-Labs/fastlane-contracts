@@ -1,0 +1,29 @@
+[profile.default]
+  optimizer_runs = 50
+  timeout = 30000
+  block_gas_limit = 300000000
+  gas_limit = 3000000000
+  gas_price = 2000000000
+  solc_version = "0.8.28"
+  evm_version = "cancun"
+  via_ir = true
+  isolate = false
+  fs_permissions = [{ access = "read-write", path = "./"}]
+  json = true
+
+[profile.ci]
+  fuzz = { runs = 10_000 }
+  verbosity = 3
+
+[fmt]
+  bracket_spacing = true
+  int_types = "long"
+  line_length = 120
+  multiline_func_header = "all"
+  number_underscore = "thousands"
+  quote_style = "double"
+  tab_width = 4
+  wrap_comments = true
+  ignore = ["./**/*.t.sol", "src/atlas/core/Storage.sol", "src/task-manager/core/Storage.sol"]
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
