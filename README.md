@@ -1,21 +1,47 @@
-# Monad Contracts
+# Fastlane Contracts
 
-FastLane smart contracts on Monad.
+Smart contracts powering Fastlane-Labs' infrastructure on Monad.
 
-## Foundry
+## About Fastlane-Labs
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+Fastlane-Labs is building critical infrastructure for the Monad ecosystem, focusing on improving the developer and user experience through optimized smart contracts and services.
 
-Foundry consists of:
+## Projects
 
--   **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
--   **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
--   **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
--   **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+### Atlas
 
-## Documentation
+Atlas is FastLane's application-specific sequencing layer, letting each dApp set its own rules for transaction ordering and MEV handling. It captures the surrounding MEV and leaves distribution up to the application—whether that means rebating users, rewarding LPs, or powering protocol revenue.
 
-https://book.getfoundry.sh/
+[Source Code](./src/atlas) | [Documentation](https://docs.shmonad.xyz/products/monad-atlas/overview/)
+
+### Shmonad
+
+Stake MON, get shMON—the liquid staking token that keeps earning + MEV rewards while you commit it into policy "vaults." One token secures the network and backs your favourite dApps, all without sacrificing liquidity.
+
+[Source Code](./src/shmonad) | [Documentation](https://docs.shmonad.xyz/products/shmonad/overview/)
+
+### Task Manager
+
+An on-chain "cron" that lets anyone schedule a transaction for a future block and guarantees it executes, paid for with bonded shMON or MON. No off-chain bots, no forgotten claims—just a single call to set it and forget it.
+
+[Source Code](./src/task-manager) | [Documentation](https://docs.shmonad.xyz/products/task-manager/overview/)
+
+### Paymaster
+
+A ready-made ERC-4337 bundler that batches UserOps and fronts gas via a shMON-funded Paymaster. The bundler handles Monad's async quirks and gets your transactions on-chain.
+
+[Source Code](./src/paymaster) | [Documentation](https://docs.shmonad.xyz/products/shbundler-4337/paymaster/)
+
+### Gas Relay
+
+A module that enables seamless gas-less UX for dApps, powered by ShMonad and the Atlas Task Manager. Users sign with their regular wallet once, then interact through an expendable session key while the dApp silently handles gas payments.
+
+Key features:
+- No user gas pop-ups - improves onboarding and reduces drop-off
+- Policy-driven security with ShMonad commitment policies
+- Composable with Atlas MEV framework and EVM-compatible contracts
+
+[Source Code](./src/common/relay) | [Module Documentation](./src/common/relay/README.md)
 
 ## Development
 
@@ -24,17 +50,24 @@ https://book.getfoundry.sh/
 - [Foundry](https://book.getfoundry.sh/getting-started/installation)
 - Make
 
+### Quick Start
+
+```shell
+# Install dependencies
+$ make install
+
+# Build the project
+$ make build
+
+# Run tests
+$ make test
+```
+
 ### Available Commands
 
 ```shell
 # Clean, install dependencies, build and test
 $ make all
-
-# Build the project (with IR-based codegen)
-$ make build
-
-# Run tests with detailed output
-$ make test
 
 # Run tests with gas reporting
 $ make test-gas
@@ -48,11 +81,11 @@ $ make snapshot
 # Start local node
 $ make anvil
 
+# Fork a specific network for testing
+$ make fork-anvil NETWORK=monad-testnet
+
 # Check contract sizes
 $ make size
-
-# Update dependencies
-$ make update
 ```
 
 ### Deployment
@@ -62,18 +95,20 @@ To deploy contracts:
 1. Set environment variables:
 ```shell
 NETWORK=<your_rpc_url>
-PRIVATE_KEY=<your_private_key>
+GOV_PRIVATE_KEY=<your_private_key>
+ADDRESS_HUB=<address_hub_address> # for subsequent deployments
 ```
 
-2. Run:
+2. Run specific deployment targets:
 ```shell
-$ make deploy
+# Deploy individual components
+$ make deploy-address-hub
+$ make deploy-atlas
+$ make deploy-shmonad
+$ make deploy-taskmanager
+$ make deploy-paymaster
 ```
 
-### Help
+## Documentation
 
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+For full documentation, visit [docs.shmonad.xyz](https://docs.shmonad.xyz/).
