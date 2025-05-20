@@ -1,10 +1,11 @@
-# Fastlane Contracts
+# FastLane Contracts
 
-Smart contracts powering Fastlane-Labs' infrastructure on Monad.
+Smart contracts powering FastLane Labs' staking and infrastructure on the Monad blockchain.
+**NOTE: Many of these smart contracts have been specifically calibrated to handle Monad's unique asynchronous execution and transaction fee mechanism. These contracts should not be deployed on other blockchains or L2s without significant modifications.**
 
-## About Fastlane-Labs
+## About FastLane Labs
 
-Fastlane-Labs is building critical infrastructure for the Monad ecosystem, focusing on improving the developer and user experience through optimized smart contracts and services.
+FastLane Labs is building critical staking, automation, and MEV infrastructure for the Monad ecosystem, focusing on improving the developer and user experience through optimized smart contracts and latency-minimized services.
 
 ## Projects
 
