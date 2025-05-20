@@ -94,19 +94,7 @@ To deploy contracts:
 
 1. Set environment variables:
 ```shell
-NETWORK=<your_rpc_url>
-GOV_PRIVATE_KEY=<your_private_key>
-ADDRESS_HUB=<address_hub_address> # for subsequent deployments
-```
-
-2. Run specific deployment targets:
-```shell
-# Deploy individual components
-$ make deploy-address-hub
-$ make deploy-atlas
-$ make deploy-shmonad
-$ make deploy-taskmanager
-$ make deploy-paymaster
+MONAD_TESTNET_RPC_URL=<your_rpc_url>
 ```
 
 ## Documentation
