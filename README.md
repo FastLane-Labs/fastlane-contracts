@@ -2,7 +2,7 @@
 
 Smart contracts powering FastLane Labs' staking and infrastructure on the Monad blockchain.
 
-**NOTE: Many of these smart contracts have been specifically calibrated to handle Monad's unique asynchronous execution and transaction fee mechanism. These contracts should not be deployed on other blockchains or L2s without significant modifications.**
+**NOTE: All of these smart contracts have been specifically calibrated to handle Monad's unique asynchronous execution and transaction fee mechanism. These contracts should not be deployed on other blockchains or L2s without significant modifications.**
 
 ## About FastLane Labs
 
