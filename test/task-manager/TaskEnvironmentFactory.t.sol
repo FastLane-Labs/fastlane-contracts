@@ -2,8 +2,8 @@
 pragma solidity ^0.8.28;
 
 import { Test } from "forge-std/Test.sol";
-import { TaskFactory } from "src/task-manager/core/Factory.sol";
-import { TaskExecutionEnvironment } from "src/task-manager/common/ExecutionEnvironment.sol";
+import { TaskFactory } from "../../src/task-manager/core/Factory.sol";
+import { TaskExecutionEnvironment } from "../../src/task-manager/common/ExecutionEnvironment.sol";
 
 contract TaskFactoryTest is TaskFactory, Test {
     address public owner;

@@ -3,10 +3,10 @@ pragma solidity 0.8.28;
 
 import { DummyGasRelay } from "./DummyGasRelay.sol";
 import { BaseTest } from "test/base/BaseTest.t.sol";
-import { ITaskManager } from "src/task-manager/interfaces/ITaskManager.sol";
-import { IShMonad } from "src/shmonad/interfaces/IShMonad.sol";
-import { GasRelayHelper } from "src/common/relay/GasRelayHelper.sol";
-import { GasRelayErrors } from "src/common/relay/GasRelayErrors.sol";
+import { ITaskManager } from "../../../src/task-manager/interfaces/ITaskManager.sol";
+import { IShMonad } from "../../../src/shmonad/interfaces/IShMonad.sol";
+import { GasRelayHelper } from "../../../src/common/relay/GasRelayHelper.sol";
+import { GasRelayErrors } from "../../../src/common/relay/GasRelayErrors.sol";
 import { NonPayableContract, GasRelayAttack } from "./TestContracts.sol";
 
 contract DummyGasRelayTest is BaseTest {

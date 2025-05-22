@@ -2,11 +2,11 @@
 pragma solidity ^0.8.19;
 
 import { TaskManagerTestHelper } from "./helpers/TaskManagerTestHelper.sol";
-import { BasicTaskEnvironment } from "src/task-manager/environments/BasicTaskEnvironment.sol";
-import { Task, Size } from "src/task-manager/types/TaskTypes.sol";
-import { TaskStorage } from "src/task-manager/core/Storage.sol";
-import { TaskBits } from "src/task-manager/libraries/TaskBits.sol";
-import { ReschedulingTaskEnvironment } from "src/task-manager/environments/ReschedulingTaskEnvironment.sol";
+import { BasicTaskEnvironment } from "../../src/task-manager/environments/BasicTaskEnvironment.sol";
+import { Task, Size } from "../../src/task-manager/types/TaskTypes.sol";
+import { TaskStorage } from "../../src/task-manager/core/Storage.sol";
+import { TaskBits } from "../../src/task-manager/libraries/TaskBits.sol";
+import { ReschedulingTaskEnvironment } from "../../src/task-manager/environments/ReschedulingTaskEnvironment.sol";
 import { VmSafe } from "forge-std/Vm.sol";
 
 import {console} from "forge-std/console.sol";

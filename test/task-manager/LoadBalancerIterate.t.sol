@@ -2,8 +2,8 @@
 pragma solidity 0.8.28;
 
 import "forge-std/Test.sol";
-import { Size, Depth, LoadBalancer, Tracker, Trackers } from "src/task-manager/types/TaskTypes.sol";
-import { TaskLoadBalancer } from "src/task-manager/core/LoadBalancer.sol";
+import { Size, Depth, LoadBalancer, Tracker, Trackers } from "../../src/task-manager/types/TaskTypes.sol";
+import { TaskLoadBalancer } from "../../src/task-manager/core/LoadBalancer.sol";
 
 contract TestLoadBalancerIterate is TaskLoadBalancer {
     constructor(address shMonad, uint64 policyId) TaskLoadBalancer(shMonad, policyId) {}

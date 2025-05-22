@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import { Task, Size, TaskMetadata, LoadBalancer } from "src/task-manager/types/TaskTypes.sol";
-import { TaskManagerEntrypoint } from "src/task-manager/core/Entrypoint.sol";
-import { ITaskExecutionEnvironment } from "src/task-manager/interfaces/IExecutionEnvironment.sol";
-import { TaskBits } from "src/task-manager/libraries/TaskBits.sol";
+import { Task, Size, TaskMetadata, LoadBalancer } from "../../src/task-manager/types/TaskTypes.sol";
+import { TaskManagerEntrypoint } from "../../src/task-manager/core/Entrypoint.sol";
+import { ITaskExecutionEnvironment } from "../../src/task-manager/interfaces/IExecutionEnvironment.sol";
+import { TaskBits } from "../../src/task-manager/libraries/TaskBits.sol";
 import { TaskManagerTestHelper } from "./helpers/TaskManagerTestHelper.sol";
-import { TaskErrors } from "src/task-manager/types/TaskErrors.sol";
+import { TaskErrors } from "../../src/task-manager/types/TaskErrors.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract TaskManagerEntrypointTest is TaskManagerTestHelper {
