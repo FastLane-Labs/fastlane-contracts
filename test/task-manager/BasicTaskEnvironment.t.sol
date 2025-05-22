@@ -2,8 +2,8 @@
 pragma solidity ^0.8.19;
 
 import { TaskManagerTestHelper } from "./helpers/TaskManagerTestHelper.sol";
-import { BasicTaskEnvironment } from "src/task-manager/environments/BasicTaskEnvironment.sol";
-import { Task, Size } from "src/task-manager/types/TaskTypes.sol";
+import { BasicTaskEnvironment } from "../../src/task-manager/environments/BasicTaskEnvironment.sol";
+import { Task, Size } from "../../src/task-manager/types/TaskTypes.sol";
 
 contract MockTarget {   
     uint256 public value;
