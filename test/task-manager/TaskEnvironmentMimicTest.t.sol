@@ -3,8 +3,8 @@ pragma solidity ^0.8.19;
 
 import { Test } from "forge-std/Test.sol";
 import { console } from "forge-std/console.sol";
-import { TaskEnvironmentMimic } from "src/task-manager/common/EnvironmentMimic.sol";
-import { TaskFactory } from "src/task-manager/core/Factory.sol";
+import { TaskEnvironmentMimic } from "../../src/task-manager/common/EnvironmentMimic.sol";
+import { TaskFactory } from "../../src/task-manager/core/Factory.sol";
 
 bytes32 constant ARG_CHECK_A = keccak256("moose stuff A");
 bytes32 constant ARG_CHECK_B = keccak256("moose stuff B");

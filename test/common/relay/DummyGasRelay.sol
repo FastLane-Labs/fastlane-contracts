@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity 0.8.28;
 
-import { GasRelayBase } from "src/common/relay/GasRelayBase.sol";
+import { GasRelayBase } from "../../../src/common/relay/GasRelayBase.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 // A simple relay contract for testing
