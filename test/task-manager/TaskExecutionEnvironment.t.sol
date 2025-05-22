@@ -3,8 +3,8 @@ pragma solidity ^0.8.28;
 
 import { Test } from "forge-std/Test.sol";
 import { console } from "forge-std/console.sol";
-import { TaskFactory } from "src/task-manager/core/Factory.sol";
-import { ITaskExecutionEnvironment } from "src/task-manager/interfaces/IExecutionEnvironment.sol";
+import { TaskFactory } from "../../src/task-manager/core/Factory.sol";
+import { ITaskExecutionEnvironment } from "../../src/task-manager/interfaces/IExecutionEnvironment.sol";
 
 /**
  * @title TaskExecutionEnvironment Tests

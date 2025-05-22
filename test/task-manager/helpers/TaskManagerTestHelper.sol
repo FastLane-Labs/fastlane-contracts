@@ -2,11 +2,11 @@
 pragma solidity 0.8.28;
 
 import { BaseTest } from "../../base/BaseTest.t.sol";
-import { Task, Size } from "src/task-manager/types/TaskTypes.sol";
-import { ITaskExecutionEnvironment } from "src/task-manager/interfaces/IExecutionEnvironment.sol";
-import { TaskExecutionEnvironment } from "src/task-manager/common/ExecutionEnvironment.sol";
-import { ShMonad } from "src/shmonad/ShMonad.sol";
-import { AddressHub } from "src/common/AddressHub.sol";
+import { Task, Size } from "../../../src/task-manager/types/TaskTypes.sol";
+import { ITaskExecutionEnvironment } from "../../../src/task-manager/interfaces/IExecutionEnvironment.sol";
+import { TaskExecutionEnvironment } from "../../../src/task-manager/common/ExecutionEnvironment.sol";
+import { ShMonad } from "../../../src/shmonad/ShMonad.sol";
+import { AddressHub } from "../../../src/common/AddressHub.sol";
 
 contract MockTarget {
     uint256 public value;
