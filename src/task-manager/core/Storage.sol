@@ -20,6 +20,7 @@ abstract contract TaskStorage is TaskEvents, TaskErrors {
     uint256 internal constant _MAX_GROUP_DEPTH = 3;
     uint256 internal constant _BITMAP_SPECIFICITY = 4;
     uint256 internal constant _MIN_ITERATION_GAS_REMAINER = 25_000;
+    uint256 internal constant _BASE_FEE_COEFFICIENT = 8;
 
     /// @notice Maximum distance (in blocks) that a task can be scheduled ahead (~3 weeks)
     uint64 public constant MAX_SCHEDULE_DISTANCE = uint64(_GROUP_SIZE) ** uint64(_MAX_GROUP_DEPTH);
@@ -39,7 +40,7 @@ abstract contract TaskStorage is TaskEvents, TaskErrors {
     uint64 public immutable POLICY_ID;
 
     mapping(address => TaskMetadata) public S_taskData;
-    mapping(Size => mapping(uint64 => bytes32[])) public S_taskIdQueue;
+    mapping(Size => mapping(uint64 => mapping(uint16 => bytes32))) public S_taskIdQueue;
     mapping(Size => mapping(Depth => mapping(uint256 => Tracker))) public S_metrics;
 
     // Mapping for storing task cancellation authorities
@@ -102,5 +103,13 @@ abstract contract TaskStorage is TaskEvents, TaskErrors {
     /// @return The task metadata
     function getTaskMetadata(address environment) external view returns (TaskMetadata memory) {
         return S_taskData[environment];
+    }
+
+    function _addTaskId(bytes32 taskId, Size size, uint64 targetBlock, uint16 taskIndex) internal {
+        S_taskIdQueue[size][targetBlock][taskIndex] = taskId;
+    }
+
+    function _loadTaskId(Size size, uint64 targetBlock, uint16 taskIndex) internal view returns (bytes32 taskId) {
+        taskId = S_taskIdQueue[size][targetBlock][taskIndex];
     }
 }

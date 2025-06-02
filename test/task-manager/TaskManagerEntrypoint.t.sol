@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import { Task, Size, TaskMetadata, LoadBalancer } from "src/task-manager/types/TaskTypes.sol";
-import { TaskManagerEntrypoint } from "src/task-manager/core/Entrypoint.sol";
-import { ITaskExecutionEnvironment } from "src/task-manager/interfaces/IExecutionEnvironment.sol";
-import { TaskBits } from "src/task-manager/libraries/TaskBits.sol";
-import { TaskManagerTestHelper } from "./helpers/TaskManagerTestHelper.sol";
-import { TaskErrors } from "src/task-manager/types/TaskErrors.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+import { Task, Size, TaskMetadata, LoadBalancer } from "../../src/task-manager/types/TaskTypes.sol";
+import { TaskManagerEntrypoint } from "../../src/task-manager/core/Entrypoint.sol";
+import { ITaskExecutionEnvironment } from "../../src/task-manager/interfaces/IExecutionEnvironment.sol";
+import { TaskBits } from "../../src/task-manager/libraries/TaskBits.sol";
+import { TaskManagerTestHelper } from "./helpers/TaskManagerTestHelper.sol";
+import { TaskErrors } from "../../src/task-manager/types/TaskErrors.sol";
+
 
 contract TaskManagerEntrypointTest is TaskManagerTestHelper {
 
@@ -654,7 +656,7 @@ contract TaskManagerEntrypointTest is TaskManagerTestHelper {
         assertTrue(feesEarned > 0, "Should earn fees from execution");
 
         // Get final load balancer state
-        (uint64 finalBlockLarge, uint64 finalBlockMedium, uint64 finalBlockSmall, uint64 finalBlockUnknown1, uint64 finalBlockUnknown2) = taskManager.S_loadBalancer();
+        (uint64 finalBlockLarge, uint64 finalBlockMedium, uint64 finalBlockSmall, uint32 targetDelay, uint64 finalBlockUnknown2) = taskManager.S_loadBalancer();
 
         // Verify task was executed
         assertTrue(taskManager.isTaskExecuted(taskId), "Medium task should be executed");
@@ -663,7 +665,7 @@ contract TaskManagerEntrypointTest is TaskManagerTestHelper {
         assertEq(finalBlockMedium, targetBlock, "Should be at the task block");
         assertEq(finalBlockLarge, targetBlock, "Should be at the task block");
         assertEq(finalBlockSmall, targetBlock, "Should be at the task block");
-        assertEq(finalBlockUnknown1, 0, "Unknown1 should be 0");
+        assertEq(targetDelay, 3, "targetDelay should be 3");
         assertEq(finalBlockUnknown2, 0, "Unknown2 should be 0");
         assertTrue(finalBlockMedium > initialBlockMedium, "Should have made progress in medium block processing");
 

@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import { TaskManagerTestHelper } from "./helpers/TaskManagerTestHelper.sol";
-import { BasicTaskEnvironment } from "src/task-manager/environments/BasicTaskEnvironment.sol";
-import { Task, Size } from "src/task-manager/types/TaskTypes.sol";
-import { TaskStorage } from "src/task-manager/core/Storage.sol";
-import { TaskBits } from "src/task-manager/libraries/TaskBits.sol";
-import { ReschedulingTaskEnvironment } from "src/task-manager/environments/ReschedulingTaskEnvironment.sol";
 import { VmSafe } from "forge-std/Vm.sol";
 
-import {console} from "forge-std/console.sol";
+import { TaskManagerTestHelper } from "./helpers/TaskManagerTestHelper.sol";
+import { BasicTaskEnvironment } from "../../src/task-manager/environments/BasicTaskEnvironment.sol";
+import { Task, Size } from "../../src/task-manager/types/TaskTypes.sol";
+import { TaskStorage } from "../../src/task-manager/core/Storage.sol";
+import { TaskBits } from "../../src/task-manager/libraries/TaskBits.sol";
+import { ReschedulingTaskEnvironment } from "../../src/task-manager/environments/ReschedulingTaskEnvironment.sol";
 
 contract MockFailingTarget {
     error TaskFailed();
@@ -203,5 +202,111 @@ contract ReschedulingTaskEnvironmentTest is TaskManagerTestHelper {
         taskManager.cancelTask(finalTaskId);
         assertTrue(taskManager.isTaskCancelled(finalTaskId), "Final rescheduled task should be cancelled by environment canceller");
         vm.stopPrank();
+    }
+
+    function test_RescheduleTask_RefundsInsufficientMsgValue() public {
+        // Deploy the target contract that will fail
+        MockFailingTarget testTarget = new MockFailingTarget();
+
+        // Encode the task data for a rescheduling task
+        bytes memory taskData = abi.encodeWithSelector(
+            EXECUTE_TASK_SELECTOR,
+            abi.encode(
+                address(testTarget),
+                abi.encodeWithSelector(MockFailingTarget.increment.selector)
+            )
+        );
+
+        // Schedule initial task for next block
+        uint64 targetBlock = uint64(block.number + 1);
+        vm.prank(user);
+        (bool scheduled, uint256 executionCost, bytes32 taskId) = taskManager.scheduleWithBond(
+            address(environment),
+            250_000,
+            targetBlock,
+            type(uint256).max/2,
+            taskData
+        );
+        assertTrue(scheduled, "Task should be scheduled");
+        assertGt(executionCost, 0, "Execution cost should be greater than 0");
+
+        // Store initial user balance
+        uint256 initialUserBalance = user.balance;
+        
+        // Execute the task - it will fail and try to reschedule with insufficient msg.value
+        vm.roll(targetBlock + 1);
+        
+        // The environment will try to reschedule during execution
+        // We need to provide some ETH to the environment for it to send during reschedule
+        vm.deal(address(environment), 1 ether);
+        
+        // Record the environment's balance before execution
+        uint256 envBalanceBefore = address(environment).balance;
+        
+        // Execute the task - this will trigger a reschedule attempt with insufficient funds
+        uint256 feesEarned = taskManager.executeTasks(payout, 0);
+        assertTrue(feesEarned > 0, "Should earn fees for execution attempt");
+        assertTrue(taskManager.isTaskExecuted(taskId), "Original task should be executed (via rescheduling)");
+        
+        // Verify that if the environment had sent some ETH during reschedule but it was insufficient,
+        // it should have been refunded (this tests the bug fix)
+        // The exact balance check depends on the rescheduling implementation, but we verify
+        // that the environment didn't lose ETH unnecessarily
+        uint256 envBalanceAfter = address(environment).balance;
+        
+        // The environment should not have lost significant ETH if the reschedule used bonded shMONAD
+        // (allowing for small gas costs)
+        assertLe(envBalanceBefore - envBalanceAfter, 0.01 ether, "Environment should not lose significant ETH on insufficient msg.value");
+    }
+
+    function test_RescheduleTask_CorrectUnitConversion() public {
+        // This test specifically targets the unit conversion bug where
+        // executionCost (in MON) was incorrectly passed to _takeBondedShmonad (expects shMONAD)
+        
+        // Deploy the target contract that will fail
+        MockFailingTarget testTarget = new MockFailingTarget();
+
+        // Encode the task data for a rescheduling task  
+        bytes memory taskData = abi.encodeWithSelector(
+            EXECUTE_TASK_SELECTOR,
+            abi.encode(
+                address(testTarget),
+                abi.encodeWithSelector(MockFailingTarget.increment.selector)
+            )
+        );
+
+        // Schedule initial task
+        uint64 targetBlock = uint64(block.number + 1);
+        vm.prank(user);
+        (bool scheduled, uint256 executionCost, bytes32 taskId) = taskManager.scheduleWithBond(
+            address(environment),
+            250_000,
+            targetBlock,
+            type(uint256).max/2,
+            taskData
+        );
+        assertTrue(scheduled, "Task should be scheduled");
+        assertGt(executionCost, 0, "Execution cost should be greater than 0");
+
+        // Get user's bonded shMONAD balance before execution
+        uint64 policyId = taskManager.POLICY_ID();
+        uint256 bondedBalanceBefore = shMonad.balanceOfBonded(policyId, user);
+        
+        // Execute the task - it will fail and reschedule using bonded shMONAD
+        vm.roll(targetBlock + 1);
+        uint256 feesEarned = taskManager.executeTasks(payout, 0);
+        assertTrue(feesEarned > 0, "Should earn fees for execution attempt");
+        assertTrue(taskManager.isTaskExecuted(taskId), "Original task should be executed (via rescheduling)");
+        
+        // Get user's bonded shMONAD balance after execution
+        uint256 bondedBalanceAfter = shMonad.balanceOfBonded(policyId, user);
+        
+        // Verify that the correct amount was deducted from bonded shMONAD
+        // The deduction should be reasonable (not zero, not excessively large)
+        uint256 deducted = bondedBalanceBefore - bondedBalanceAfter;
+        assertGt(deducted, 0, "Some bonded shMONAD should have been deducted for rescheduling");
+        
+        // The deducted amount should be reasonable (less than 10% of initial balance as a sanity check)
+        assertLt(deducted, bondedBalanceBefore / 10, "Deducted amount should not be excessively large");
     }
 } 

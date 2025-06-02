@@ -79,15 +79,18 @@ abstract contract TaskPricing is TaskLoadBalancer {
     /// @return executionQuote Estimated execution cost with adjustments
     function _getExecutionQuote(Trackers memory trackers) internal view returns (uint256 executionQuote) {
         // Get base fee from gas limit for this task size if we have no fees collected
-        uint256 _baseFee = uint256(_MIN_FEE_RATE * _maxGasFromSize(trackers.size));
+        uint256 _baseFee = _maxGasFromSize(trackers.size) * block.basefee / _BASE_FEE_COEFFICIENT / _FEE_SIG_FIG;
 
         // Get average unpaid fees rounded up
         (uint256 _avgFeeB, uint256 _avgFeeC, uint256 _avgFeeD) = _getAverageUnpaidFees(trackers, Math.Rounding.Ceil);
 
-        // Adjust avg fee if they're below the base fee
-        if (_avgFeeB < _baseFee) _avgFeeB = _baseFee;
-        if (_avgFeeC < _baseFee) _avgFeeC = _baseFee;
-        if (_avgFeeD < _baseFee) _avgFeeD = _baseFee;
+        // Adjust avg fee if they're significantly above or below the base fee
+        if (_avgFeeB < _baseFee / 2 || _avgFeeB > _baseFee * 2) _avgFeeB = _baseFee;
+        if (_avgFeeC < _baseFee / 4 || _avgFeeC > _baseFee * 4) _avgFeeC = _baseFee;
+        if (_avgFeeD < _baseFee / 8 || _avgFeeD > _baseFee * 8) _avgFeeD = _baseFee;
+
+        // Adjust fees for delays
+        (_avgFeeB, _avgFeeC, _avgFeeD) = _adjustFeeQuotesForDelays(trackers, _avgFeeB, _avgFeeC, _avgFeeD);
 
         // Get the weighted average with ceiling rounding for quotes rounded up
         uint256 weightedB = Math.mulDiv(_avgFeeB, _B_MOD, _MOD_BASE, Math.Rounding.Ceil);
@@ -107,6 +110,79 @@ abstract contract TaskPricing is TaskLoadBalancer {
         executionQuote = Math.mulDiv(executionQuote, forecastRate, _BASE_RATE, Math.Rounding.Ceil);
 
         return executionQuote;
+    }
+
+    /// @notice Naively adjusts the average fees for each grouping based on the execution delays
+    /// @dev Attempts to economically incentivize execution and disincentivize overloading the task manager by
+    /// adjusting the fees so that a longer delay will increase the fee. Note that this is in progress and is just
+    /// a placeholder formula - it is deeply flawed and does not accurately adjust queue pricing based on supply /
+    /// demand. A robust formula will be added once Monad's transaction fee mechanism is finalized.
+    /// @param trackers Metrics for target block and size
+    /// @param avgFeeB Unadjusted average unpaid fee per task of B grouping
+    /// @param avgFeeC Unadjusted average unpaid fee per task of C grouping
+    /// @param avgFeeD Unadjusted average unpaid fee per task of D grouping
+    /// @return adjAvgFeeB Delay-adjusted average unpaid fee per task of B grouping
+    /// @return adjAvgFeeC Delay-adjusted average unpaid fee per task of C grouping
+    /// @return adjAvgFeeD Delay-adjusted average unpaid fee per task of D grouping
+    function _adjustFeeQuotesForDelays(
+        Trackers memory trackers,
+        uint256 avgFeeB,
+        uint256 avgFeeC,
+        uint256 avgFeeD
+    )
+        internal
+        view
+        returns (uint256 adjAvgFeeB, uint256 adjAvgFeeC, uint256 adjAvgFeeD)
+    {
+        uint256 _benchmarkDelay = uint256(trackers.loadBalancer.targetDelay);
+        uint256 _maxPenalizedDelay = _benchmarkDelay * _BASE_FEE_COEFFICIENT / 2;
+
+        uint256 _currentActiveBlock = trackers.size == Size.Small
+            ? uint256(trackers.loadBalancer.activeBlockSmall)
+            : (
+                trackers.size == Size.Medium
+                    ? uint256(trackers.loadBalancer.activeBlockMedium)
+                    : uint256(trackers.loadBalancer.activeBlockLarge)
+            );
+        if (_currentActiveBlock >= block.number) _currentActiveBlock = block.number - 1;
+
+        // TODO: Evaluate loading in current tracker - the trackers in memory are the trackers for the target block, not
+        // the current block.
+        // Will balance this fee precision against the extra SLOAD cost once the monad tx fee mechanism is finalized.
+        uint256 _avgDelayB = block.number - _currentActiveBlock; // NOTE: Cant schedule a task in a current block that
+            // is being executed
+        uint256 _avgDelayC = trackers.c.executedTasks == 0
+            ? block.number - _currentActiveBlock
+            : (block.number - _currentActiveBlock + uint256(trackers.c.cumulativeDelays))
+                / (uint256(trackers.c.executedTasks) + 1);
+        uint256 _avgDelayD = trackers.d.executedTasks == 0
+            ? block.number - _currentActiveBlock
+            : (block.number - _currentActiveBlock + uint256(trackers.d.cumulativeDelays))
+                / (uint256(trackers.d.executedTasks) + 1);
+
+        // NOTE: this caps the fee rate adjustment from delays, but the fees are still increasing and receiving other
+        // penalties due to congestion - total cost remains uncapped.
+        if (_avgDelayB > _maxPenalizedDelay) {
+            _avgDelayB = _maxPenalizedDelay;
+        } else if (_avgDelayB == 0) {
+            _avgDelayB = 1;
+        }
+        if (_avgDelayC > _maxPenalizedDelay) {
+            _avgDelayC = _maxPenalizedDelay;
+        } else if (_avgDelayC == 0) {
+            _avgDelayC = 1;
+        }
+        if (_avgDelayD > _maxPenalizedDelay) {
+            _avgDelayD = _maxPenalizedDelay;
+        } else if (_avgDelayD == 0) {
+            _avgDelayD = 1;
+        }
+
+        adjAvgFeeB = avgFeeB * _avgDelayB / _benchmarkDelay;
+        adjAvgFeeC = avgFeeC * _avgDelayC / _benchmarkDelay;
+        adjAvgFeeD = avgFeeD * _avgDelayD / _benchmarkDelay;
+
+        return (adjAvgFeeB, adjAvgFeeC, adjAvgFeeD);
     }
 
     /// @notice Generates average fees for incomplete tasks for the different task groupings
@@ -149,11 +225,35 @@ abstract contract TaskPricing is TaskLoadBalancer {
         avgFeeD = _incompleteTasksD == 0 ? 0 : Math.mulDiv(_unpaidFeesD, 1, _incompleteTasksD, rounding);
     }
 
-    function _convertMonToShMon(uint256 amount) internal view returns (uint256 shares) {
+    /// @dev Returns the number of shMON shares you need to withdraw to receive input MON amount.
+    /// @notice Convert MON to ShMON
+    /// @param amount Amount of MON to convert
+    /// @return shares Equivalent amount in ShMON shares
+    function _convertMonToWithdrawnShMon(uint256 amount) internal view returns (uint256 shares) {
+        shares = IShMonad(SHMONAD).previewWithdraw(amount);
+    }
+
+    /// @dev Returns the MON amount you'll receive if you withdraw the input shMON shares.
+    /// @notice Convert ShMON to MON
+    /// @param shares Number of ShMON shares to convert
+    /// @return amount Equivalent amount in MON
+    function _convertWithdrawnShMonToMon(uint256 shares) internal view returns (uint256 amount) {
+        amount = IShMonad(SHMONAD).previewRedeem(shares);
+    }
+
+    /// @dev Returns the number of shMON shares you'll receive if you deposit the input MON amount.
+    /// @notice Convert MON to ShMON
+    /// @param amount Amount of MON to convert
+    /// @return shares Equivalent amount in ShMON shares
+    function _convertDepositedMonToShMon(uint256 amount) internal view returns (uint256 shares) {
         shares = IShMonad(SHMONAD).previewDeposit(amount);
     }
 
-    function _convertShMonToMon(uint256 shares) internal view returns (uint256 amount) {
+    /// @dev Returns the MON amount you'll need to deposit to receive the input shMON shares.
+    /// @notice Convert ShMON to MON
+    /// @param shares Number of ShMON shares to convert
+    /// @return amount Equivalent amount in MON
+    function _convertShMonToDepositedMon(uint256 shares) internal view returns (uint256 amount) {
         amount = IShMonad(SHMONAD).previewMint(shares);
     }
 }

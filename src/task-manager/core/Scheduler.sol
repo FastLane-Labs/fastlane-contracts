@@ -50,12 +50,12 @@ abstract contract TaskScheduler is TaskExecutor, TaskFactory, NoncesUpgradeable 
         (address _environment, uint64 _initBlock, uint16 _initIndex, Size _size,) = taskId.unpack();
 
         // Verify the task queue exists and index is valid
-        if (S_taskIdQueue[_size][_initBlock].length == 0 || _initIndex >= S_taskIdQueue[_size][_initBlock].length) {
+        bytes32 _currentTaskId = _loadTaskId(_size, _initBlock, _initIndex);
+        if (_currentTaskId == bytes32(0)) {
             revert TaskNotFound(taskId);
         }
 
-        bytes32 _currentTaskId = S_taskIdQueue[_size][_initBlock][_initIndex];
-
+        // See if task is cancelled
         (,,,, bool _cancelled) = _currentTaskId.unpack();
 
         // Then verify task is still active
@@ -69,7 +69,8 @@ abstract contract TaskScheduler is TaskExecutor, TaskFactory, NoncesUpgradeable 
         }
 
         // Update the task with the cancelled status
-        S_taskIdQueue[_size][_initBlock][_initIndex] = TaskBits.pack(_environment, _initBlock, _initIndex, _size, true);
+        bytes32 _newTaskId = TaskBits.pack(_environment, _initBlock, _initIndex, _size, true);
+        _addTaskId(_newTaskId, _size, _initBlock, _initIndex);
 
         emit TaskCancelled(taskId, msg.sender);
     }

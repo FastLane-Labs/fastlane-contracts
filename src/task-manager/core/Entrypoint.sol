@@ -11,10 +11,13 @@ import { TaskStorage } from "./Storage.sol";
 import { OwnableUpgradeable } from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
+import { SafeTransferLib } from "@solady/utils/SafeTransferLib.sol";
+
 /// @title TaskManagerEntrypoint
 /// @notice Public interface for task management
 contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeable {
     using TaskBits for bytes32;
+    using SafeTransferLib for address;
 
     uint256 internal constant _MINIMUM_RESERVE = SMALL_GAS + ITERATION_BUFFER + 5000;
 
@@ -25,7 +28,7 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
 
     /// @notice Initialize the contract
     /// @param deployer The deployer of the contract
-    function initialize(address deployer) public reinitializer(2) {
+    function initialize(address deployer) public reinitializer(3) {
         __Ownable_init(deployer);
 
         // Initialize LoadBalancer with current block number
@@ -33,6 +36,7 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
         S_loadBalancer.activeBlockSmall = currentBlock;
         S_loadBalancer.activeBlockMedium = currentBlock;
         S_loadBalancer.activeBlockLarge = currentBlock;
+        S_loadBalancer.targetDelay = uint32(3);
     }
 
     /// @notice Process task scheduling with validation, payment, and queueing
@@ -68,7 +72,7 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
         // Adjust for _FEE_SIG_FIG
         uint256 executionCostInShMon = _executionCostUnadj * _FEE_SIG_FIG;
         // Convert the cost to MON and revert if it exceeds max payment
-        executionCost = _convertShMonToMon(executionCostInShMon);
+        executionCost = _convertShMonToDepositedMon(executionCostInShMon);
         if (executionCost > maxPayment) revert TaskCostAboveMax(executionCost, maxPayment);
 
         // Handle payment
@@ -90,7 +94,7 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
         taskId = TaskBits.pack(_environment, targetBlock, _taskIndexInBlock, _taskMetaData.size, false);
 
         // Push task to the end of the queue
-        S_taskIdQueue[_taskMetaData.size][targetBlock].push(taskId);
+        _addTaskId(taskId, _taskMetaData.size, targetBlock, _taskIndexInBlock);
 
         // Store the trackers and metadata
         _storeAllTrackers(_trackers);
@@ -194,10 +198,11 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
         }
 
         // Validate task parameters and get quote
-        (, uint256 _executionCostUnadj) = _getTaskQuote(_size, targetBlock);
+        (Trackers memory _trackers, uint256 _executionCostUnadj) = _getTaskQuote(_size, targetBlock);
 
         // Adjust for _FEE_SIG_FIG and revert if cost exceeds max payment
-        executionCost = _executionCostUnadj * _FEE_SIG_FIG;
+        uint256 executionCostInShMon = _executionCostUnadj * _FEE_SIG_FIG;
+        executionCost = _convertShMonToDepositedMon(executionCostInShMon);
         if (executionCost > maxPayment) revert TaskCostAboveMax(executionCost, maxPayment);
 
         // Load the metadata
@@ -205,15 +210,18 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
 
         // Handle payment
         if (msg.value < executionCost) {
-            _takeBondedShmonad(_taskMetaData.owner, executionCost);
+            // TODO: Evaluate bonding any spare msg.value - it's skipped here because of the extra gas overhead
+            if (msg.value > 0) {
+                address(msg.sender).safeTransferETH(msg.value);
+            }
+            _takeBondedShmonad(_taskMetaData.owner, executionCostInShMon);
         } else {
             // Refund any msg.value back to task
             _takeMonad(_environment, executionCost);
         }
 
         // Schedule the task with tracking updates
-        taskId =
-            TaskBits.pack(_environment, targetBlock, uint16(S_taskIdQueue[_size][targetBlock].length), _size, false);
+        taskId = TaskBits.pack(_environment, targetBlock, uint16(_trackers.b.totalTasks), _size, false);
 
         // Store the new taskId in the lock to prevent a task spawning multiple iterations
         T_currentTaskId = taskId;
@@ -254,7 +262,10 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
         (, uint64 _initBlock, uint16 _initIndex, Size _size,) = taskId.unpack();
 
         // Pull up the task
-        bytes32 _currentTaskId = S_taskIdQueue[_size][_initBlock][_initIndex];
+        bytes32 _currentTaskId = _loadTaskId(_size, _initBlock, _initIndex);
+        if (_currentTaskId == bytes32(0)) {
+            revert TaskNotFound(taskId);
+        }
 
         // Get the most recent info
         (,,,, cancelled) = _currentTaskId.unpack();
@@ -269,7 +280,10 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
         (, uint64 _initBlock, uint16 _initIndex, Size _size,) = taskId.unpack();
 
         // Pull up the task
-        bytes32 _currentTaskId = S_taskIdQueue[_size][_initBlock][_initIndex];
+        bytes32 _currentTaskId = _loadTaskId(_size, _initBlock, _initIndex);
+        if (_currentTaskId == bytes32(0)) {
+            revert TaskNotFound(taskId);
+        }
 
         // Get the most recent info, return false if it's cancelled
         (,,,, bool _cancelled) = _currentTaskId.unpack();
@@ -297,7 +311,7 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
         cost = _costUnadj * _FEE_SIG_FIG;
 
         // Convert to MON and add 1 to account for rounding on shMonad
-        cost = _convertShMonToMon(cost);
+        cost = _convertShMonToDepositedMon(cost);
     }
 
     /// @inheritdoc ITaskManager

@@ -56,7 +56,7 @@ abstract contract TaskExecutor is TaskPricing {
         require(_taskIndexInBlock == _initIndex, "ERR-UnmatchedIndex");
 
         // Push task to the end of the queue
-        S_taskIdQueue[_size][_targetBlock].push(_taskId);
+        _addTaskId(_taskId, _size, _targetBlock, _taskIndexInBlock);
 
         // Swap back in the execution trackers
         trackers = _swapOutRescheduleTrackers(_rescheduleTrackers, trackers);
@@ -96,13 +96,14 @@ abstract contract TaskExecutor is TaskPricing {
         // Initial allocation
         Trackers memory _trackers = _initTrackers(targetGasReserve);
         uint256 _minLeftoverGas = _maxGasFromSize(_trackers.size) + ITERATION_BUFFER + targetGasReserve + 5000;
+        uint256 _totalFeesEarned;
 
         // Process queues while we have gas
         do {
             // Run the current queue and accumulate fees
             uint256 feesFromThisQueue;
             (_trackers, feesFromThisQueue) = _runQueue(_trackers, _minLeftoverGas);
-            feesSharesEarned += feesFromThisQueue;
+            _totalFeesEarned += feesFromThisQueue;
 
             if (_trackers.updateAllTrackers) {
                 _trackers.updateAllTrackers = false;
@@ -119,8 +120,8 @@ abstract contract TaskExecutor is TaskPricing {
         } while (gasleft() > _minLeftoverGas);
 
         // Handle payouts if we earned any fees
-        if (feesSharesEarned > 0) {
-            _handleExecutionFees(payoutAddress, feesSharesEarned);
+        if (_totalFeesEarned > 0) {
+            feesSharesEarned = _handleExecutionFees(payoutAddress, _totalFeesEarned);
         }
 
         // Store final state
@@ -174,6 +175,10 @@ abstract contract TaskExecutor is TaskPricing {
             bytes32 taskId = _loadNextTask(trackers);
             (address environment,,, Size taskSize, bool cancelled) = taskId.unpack();
 
+            // NOTE: empty taskIds are a result of TaskManager upgrades that affect the
+            // storage layout. They should NEVER happen outside of testnet environments.
+            if (taskId == bytes32(0)) cancelled = true; // TODO: Remove this line on mainnet.
+
             // Calculate reimbursement (prior to call or reschedule accounting)
             uint256 _thisIterationPayoutUnadj = _getReimbursementAmount(trackers);
 
@@ -200,7 +205,7 @@ abstract contract TaskExecutor is TaskPricing {
     /// @param trackers Current execution state containing block number and metrics
     /// @return taskId The ID of the next task to execute
     function _loadNextTask(Trackers memory trackers) internal view returns (bytes32 taskId) {
-        taskId = S_taskIdQueue[trackers.size][trackers.blockNumber][trackers.b.executedTasks];
+        taskId = _loadTaskId(trackers.size, trackers.blockNumber, uint16(trackers.b.executedTasks));
     }
 
     /// @notice Determines task size category based on gas limit
@@ -218,43 +223,44 @@ abstract contract TaskExecutor is TaskPricing {
     /// @dev Splits fees between executor and protocol, updates bond balances
     /// @param executor Address of the task executor
     /// @param payoutInShares Total amount to distribute in shares
-    function _handleExecutionFees(address executor, uint256 payoutInShares) internal {
-        uint256 validatorPayout = Math.mulDiv(
+    /// @return executorPayout Amount received by the executor
+    function _handleExecutionFees(address executor, uint256 payoutInShares) internal returns (uint256 executorPayout) {
+        uint256 _validatorPayout = Math.mulDiv(
             payoutInShares, TaskAccountingMath.VALIDATOR_FEE_BPS, TaskAccountingMath.BPS_SCALE, Math.Rounding.Floor
         );
 
-        uint256 protocolPayout = Math.mulDiv(
+        uint256 _protocolPayout = Math.mulDiv(
             payoutInShares, TaskAccountingMath.PROTOCOL_FEE_BPS, TaskAccountingMath.BPS_SCALE, Math.Rounding.Floor
         );
 
-        uint256 executorPayout = payoutInShares - validatorPayout - protocolPayout;
+        executorPayout = payoutInShares - _validatorPayout - _protocolPayout;
 
         // First distribute validator payout
-        bool success;
+        bool _success;
         if (block.coinbase != address(0)) {
-            (success,) =
-                SHMONAD.call{ gas: gasleft() }(abi.encodeCall(IERC20.transfer, (block.coinbase, validatorPayout)));
-            if (!success) {
-                revert ValidatorReimbursementFailed(block.coinbase, validatorPayout);
+            (_success,) =
+                SHMONAD.call{ gas: gasleft() }(abi.encodeCall(IERC20.transfer, (block.coinbase, _validatorPayout)));
+            if (!_success) {
+                revert ValidatorReimbursementFailed(block.coinbase, _validatorPayout);
             }
         } else {
             // Add validator payout to protocol payout if coinbase is not set
-            protocolPayout += validatorPayout;
+            _protocolPayout += _validatorPayout;
         }
 
         // Then distribute executor payout
-        (success,) = SHMONAD.call{ gas: gasleft() }(abi.encodeCall(IERC20.transfer, (executor, executorPayout)));
-        if (!success) {
+        (_success,) = SHMONAD.call{ gas: gasleft() }(abi.encodeCall(IERC20.transfer, (executor, executorPayout)));
+        if (!_success) {
             revert ExecutorReimbursementFailed(executor, executorPayout);
         }
         emit ExecutorReimbursed(executor, executorPayout);
 
         // Then boost yield with protocol fee instead
-        (success,) =
-            SHMONAD.call{ gas: gasleft() }(abi.encodeWithSelector(bytes4(0x2eac4115), protocolPayout, address(this)));
-        if (!success) {
-            revert BoostYieldFailed(address(this), protocolPayout);
+        (_success,) =
+            SHMONAD.call{ gas: gasleft() }(abi.encodeWithSelector(bytes4(0x2eac4115), _protocolPayout, address(this)));
+        if (!_success) {
+            revert BoostYieldFailed(address(this), _protocolPayout);
         }
-        emit ProtocolFeeCollected(protocolPayout);
+        emit ProtocolFeeCollected(_protocolPayout);
     }
 }

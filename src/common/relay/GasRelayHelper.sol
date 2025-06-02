@@ -424,7 +424,7 @@ contract GasRelayHelper is GasRelayErrors {
     /// @param owner Address of the owner
     /// @return amount Amount bonded
     function _amountBondedToThis(address owner) internal view returns (uint256 amount) {
-        amount = IShMonad(SHMONAD).convertToAssets(IShMonad(SHMONAD).balanceOfBonded(POLICY_ID, owner));
+        amount = _convertWithdrawnShMonToMon(IShMonad(SHMONAD).balanceOfBonded(POLICY_ID, owner));
     }
 
     /// @notice Get shares unbonding from this contract for an owner
@@ -446,18 +446,36 @@ contract GasRelayHelper is GasRelayErrors {
         IShMonad(SHMONAD).boostYield{ value: amount }();
     }
 
+    /// @dev Returns the number of shMON shares you need to withdraw to receive input MON amount.
     /// @notice Convert MON to ShMON
     /// @param amount Amount of MON to convert
     /// @return shares Equivalent amount in ShMON shares
-    function _convertMonToShMon(uint256 amount) internal view returns (uint256 shares) {
-        shares = IShMonad(SHMONAD).convertToShares(amount);
+    function _convertMonToWithdrawnShMon(uint256 amount) internal view returns (uint256 shares) {
+        shares = IShMonad(SHMONAD).previewWithdraw(amount);
     }
 
+    /// @dev Returns the MON amount you'll receive if you withdraw the input shMON shares.
     /// @notice Convert ShMON to MON
     /// @param shares Number of ShMON shares to convert
     /// @return amount Equivalent amount in MON
-    function _convertShMonToMon(uint256 shares) internal view returns (uint256 amount) {
-        amount = IShMonad(SHMONAD).convertToAssets(shares);
+    function _convertWithdrawnShMonToMon(uint256 shares) internal view returns (uint256 amount) {
+        amount = IShMonad(SHMONAD).previewRedeem(shares);
+    }
+
+    /// @dev Returns the number of shMON shares you'll receive if you deposit the input MON amount.
+    /// @notice Convert MON to ShMON
+    /// @param amount Amount of MON to convert
+    /// @return shares Equivalent amount in ShMON shares
+    function _convertDepositedMonToShMon(uint256 amount) internal view returns (uint256 shares) {
+        shares = IShMonad(SHMONAD).previewDeposit(amount);
+    }
+
+    /// @dev Returns the MON amount you'll need to deposit to receive the input shMON shares.
+    /// @notice Convert ShMON to MON
+    /// @param shares Number of ShMON shares to convert
+    /// @return amount Equivalent amount in MON
+    function _convertShMonToDepositedMon(uint256 shares) internal view returns (uint256 amount) {
+        amount = IShMonad(SHMONAD).previewMint(shares);
     }
 
     /// @notice Deposit MON and bond for a recipient

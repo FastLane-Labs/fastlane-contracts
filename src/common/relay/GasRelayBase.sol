@@ -37,7 +37,7 @@ contract GasRelayBase is GasRelayHelper {
 
         sessionKeyData.owner = owner;
         sessionKeyData.ownerCommittedShares = _sharesBondedToThis(owner);
-        sessionKeyData.ownerCommittedAmount = _convertShMonToMon(sessionKeyData.ownerCommittedShares);
+        sessionKeyData.ownerCommittedAmount = _convertWithdrawnShMonToMon(sessionKeyData.ownerCommittedShares);
         if (sessionKeyData.ownerCommittedAmount > 0) --sessionKeyData.ownerCommittedAmount; // Rounding
 
         address key = _getSessionKeyAddress(sessionKeyData.owner);
@@ -171,7 +171,7 @@ contract GasRelayBase is GasRelayHelper {
             if (_fundingAmount > 0 && _minSharesNeeded > 0) {
                 uint256 _sharesAvailable = _sharesBondedToThis(owner);
                 if (_minSharesNeeded > _sharesAvailable) {
-                    uint256 _reservedBondedAmount = _convertShMonToMon(_minSharesNeeded - _sharesAvailable) + 1;
+                    uint256 _reservedBondedAmount = _convertWithdrawnShMonToMon(_minSharesNeeded - _sharesAvailable);
                     if (_fundingAmount > _reservedBondedAmount) {
                         _fundingAmount -= _reservedBondedAmount;
                     } else {
@@ -375,9 +375,10 @@ contract GasRelayBase is GasRelayHelper {
             } else if (_deficitAmount > _replacementAmount * _BASE_FEE_MAX_INCREASE / _BASE_FEE_DENOMINATOR) {
                 // TODO: This needs more bespoke handling of base fee increases - will update once
                 // Monad TX fee mechanism is published.
-                _sharesNeeded = _convertMonToShMon(_replacementAmount * _BASE_FEE_MAX_INCREASE / _BASE_FEE_DENOMINATOR);
+                _sharesNeeded =
+                    _convertMonToWithdrawnShMon(_replacementAmount * _BASE_FEE_MAX_INCREASE / _BASE_FEE_DENOMINATOR);
             } else {
-                _sharesNeeded = _convertMonToShMon(_deficitAmount);
+                _sharesNeeded = _convertMonToWithdrawnShMon(_deficitAmount);
             }
         }
 
