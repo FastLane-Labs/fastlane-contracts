@@ -28,7 +28,7 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
 
     /// @notice Initialize the contract
     /// @param deployer The deployer of the contract
-    function initialize(address deployer) public reinitializer(3) {
+    function initialize(address deployer) public reinitializer(4) {
         __Ownable_init(deployer);
 
         // Initialize LoadBalancer with current block number
