@@ -43,8 +43,8 @@ contract GasRelayHelper is GasRelayErrors {
     /// @notice Namespace for key owner storage
     bytes32 private immutable KEY_OWNER_NAMESPACE;
 
-    /// @notice Namespace for abstracted caller transient storage
-    bytes32 private immutable ABSTRACTED_CALLER_NAMESPACE;
+    /// @notice Namespace for underlying caller transient storage
+    bytes32 private immutable UNDERLYING_CALLER_NAMESPACE;
 
     /// @notice Minimum gas required for task execution
     uint256 internal constant _MIN_TASK_EXECUTION_GAS = 110_000;
@@ -69,6 +69,9 @@ contract GasRelayHelper is GasRelayErrors {
 
     /// @notice Transient storage bit for tracking usage lock
     bytes32 private constant _IN_USE_BIT = 0x0000000000000000000000020000000000000000000000000000000000000000;
+
+    /// @notice Transient storage bit for modifying usage lock
+    bytes32 private constant _NOT_IN_USE_BITMASK = 0xfffffffffffffffffffffffdffffffffffffffffffffffffffffffffffffffff;
 
     /// @notice Transient storage bit for identifying session keys
     bytes32 private constant _IS_SESSION_KEY_BIT = 0x0000000000000000000000040000000000000000000000000000000000000000;
@@ -139,10 +142,11 @@ contract GasRelayHelper is GasRelayErrors {
                 block.chainid
             )
         );
-        ABSTRACTED_CALLER_NAMESPACE = keccak256(
+
+        UNDERLYING_CALLER_NAMESPACE = keccak256(
             abi.encode(
                 "ShMonad GasRelayHelper 1.0",
-                "Abstracted Caller Transient Namespace",
+                "Underlying Caller Transient Namespace",
                 taskManager,
                 shMonad,
                 policyIDLocal,
@@ -180,12 +184,12 @@ contract GasRelayHelper is GasRelayErrors {
     /// @return inUse True if the contract is in use
     function _inUse() internal view returns (bool inUse) {
         // Check if the transient storage has the IN_USE_BIT set
-        bytes32 _abstractedCallerTransientSlot = ABSTRACTED_CALLER_NAMESPACE;
-        bytes32 _packedAbstractedCaller;
+        bytes32 _underlyingCallerTransientSlot = UNDERLYING_CALLER_NAMESPACE;
+        bytes32 _packedUnderlyingCaller;
         assembly {
-            _packedAbstractedCaller := tload(_abstractedCallerTransientSlot)
+            _packedUnderlyingCaller := tload(_underlyingCallerTransientSlot)
         }
-        inUse = _packedAbstractedCaller & _IN_USE_BIT != 0;
+        inUse = _packedUnderlyingCaller & _IN_USE_BIT != 0;
     }
 
     /// @notice Check for reentrancy and revert if detected
@@ -198,49 +202,83 @@ contract GasRelayHelper is GasRelayErrors {
 
     /// @notice Lock the contract against reentrancy
     function _lock() internal {
-        bytes32 _abstractedCallerTransientSlot = ABSTRACTED_CALLER_NAMESPACE;
+        bytes32 _underlyingCallerTransientSlot = UNDERLYING_CALLER_NAMESPACE;
         assembly {
-            tstore(_abstractedCallerTransientSlot, _IN_USE_BIT)
+            tstore(_underlyingCallerTransientSlot, _IN_USE_BIT)
+        }
+    }
+
+    /// @notice Lock the contract against reentrancy
+    /// @param preserveUnderlyingCaller bool that determines whether the packed caller data is preserved when unlocking
+    /// @dev Set preserveUnderlyingCaller to false unless you are 100% confident that you need to access the data again
+    /// later
+    // and you either dont need reentrancy protection or you are using another mechanism that protects from reentrancy.
+    function _unlock(bool preserveUnderlyingCaller) internal {
+        bytes32 _underlyingCallerTransientSlot = UNDERLYING_CALLER_NAMESPACE;
+        if (!preserveUnderlyingCaller) {
+            assembly {
+                tstore(
+                    _underlyingCallerTransientSlot, 0x0000000000000000000000000000000000000000000000000000000000000000
+                )
+            }
+        } else {
+            assembly {
+                let _packedUnderlyingCaller := tload(_underlyingCallerTransientSlot)
+                tstore(_underlyingCallerTransientSlot, and(_packedUnderlyingCaller, _NOT_IN_USE_BITMASK))
+            }
         }
     }
 
     /// @notice Load abstracted msg sender data from transient storage
-    /// @return abstractedMsgSender Address of the abstracted msg sender
-    /// @return isSessionKey Whether the caller is a session key
-    /// @return inUse Whether the contract is in use
-    function _loadAbstractedMsgSenderData()
+    /// @param underlyingMsgSender Address of the underlying msg sender
+    /// @return abstractedMsgSender Address of the session key's owner
+    /// @return valid Bool indicating if the session key is valid
+    function _loadAbstractedMsgSenderData(address underlyingMsgSender)
         internal
         view
-        returns (address abstractedMsgSender, bool isSessionKey, bool inUse)
+        returns (address abstractedMsgSender, bool valid)
     {
-        bytes32 _abstractedCallerTransientSlot = ABSTRACTED_CALLER_NAMESPACE;
-        bytes32 _packedAbstractedCaller;
-        assembly {
-            _packedAbstractedCaller := tload(_abstractedCallerTransientSlot)
-            abstractedMsgSender :=
-                and(_packedAbstractedCaller, 0x000000000000000000000000ffffffffffffffffffffffffffffffffffffffff)
+        if (underlyingMsgSender == address(0) || underlyingMsgSender == address(this)) {
+            return (address(0), false);
         }
-        isSessionKey = _packedAbstractedCaller & _IS_SESSION_KEY_BIT != 0;
-        inUse = _packedAbstractedCaller & _IN_USE_BIT != 0;
+        SessionKey memory _sessionKey = _loadSessionKey(underlyingMsgSender);
+        abstractedMsgSender = _sessionKey.owner;
+        valid = abstractedMsgSender != address(0) && uint256(_sessionKey.expiration) > block.number;
     }
 
-    /// @notice Store abstracted msg sender in transient storage
-    /// @param abstractedMsgSender Address of the abstracted msg sender
-    /// @param isSessionKey Whether the caller is a session key
-    function _storeAbstractedMsgSender(address abstractedMsgSender, bool isSessionKey) internal {
-        bytes32 _abstractedCallerTransientSlot = ABSTRACTED_CALLER_NAMESPACE;
-        bytes32 _packedAbstractedCaller = isSessionKey ? _IN_USE_AS_SESSION_KEY_BITS : _IN_USE_BIT;
+    /// @notice Store underlying msg sender in transient storage
+    function _storeUnderlyingMsgSender(bool isSessionKey) internal {
+        // NOTE: We do not let smart contracts use session keys. EIP-7702-enabled wallets
+        // should already benefit from "session key" usage and will get treated as a
+        // default owner, which results in the same UX.
+        if (msg.sender == address(this) || address(msg.sender).code.length != 0) return;
+
+        bytes32 _underlyingCallerTransientSlot = UNDERLYING_CALLER_NAMESPACE;
+        address _underlyingCaller = address(msg.sender);
+        bytes32 _packedUnderlyingCaller = isSessionKey ? _IN_USE_AS_SESSION_KEY_BITS : _IN_USE_BIT;
         assembly {
-            tstore(_abstractedCallerTransientSlot, or(_packedAbstractedCaller, abstractedMsgSender))
+            tstore(_underlyingCallerTransientSlot, or(_packedUnderlyingCaller, _underlyingCaller))
         }
     }
 
-    /// @notice Clear abstracted msg sender from transient storage
-    function _clearAbstractedMsgSender() internal {
-        bytes32 _abstractedCallerTransientSlot = ABSTRACTED_CALLER_NAMESPACE;
+    /// @notice Load underlying msg sender data from transient storage
+    /// @return underlyingMsgSender Address of the underlying msg sender (embedded wallet / bundler)
+    /// @return isSessionKey Whether the caller is using a session key
+    /// @return inUse Whether the contract is in use
+    function _loadUnderlyingMsgSenderData()
+        internal
+        view
+        returns (address underlyingMsgSender, bool isSessionKey, bool inUse)
+    {
+        bytes32 _underlyingCallerTransientSlot = UNDERLYING_CALLER_NAMESPACE;
+        bytes32 _packedUnderlyingCaller;
         assembly {
-            tstore(_abstractedCallerTransientSlot, 0x0000000000000000000000000000000000000000000000000000000000000000)
+            _packedUnderlyingCaller := tload(_underlyingCallerTransientSlot)
+            underlyingMsgSender :=
+                and(_packedUnderlyingCaller, 0x000000000000000000000000ffffffffffffffffffffffffffffffffffffffff)
         }
+        isSessionKey = _packedUnderlyingCaller & _IS_SESSION_KEY_BIT != 0;
+        inUse = _packedUnderlyingCaller & _IN_USE_BIT != 0;
     }
 
     /// @notice Update a session key's data

@@ -197,7 +197,7 @@ contract GasRelayBase is GasRelayHelper {
         }
 
         // Set the transaction sender context
-        _storeAbstractedMsgSender(owner, false);
+        _storeUnderlyingMsgSender(false);
 
         // Execute the decorated function
         _;
@@ -211,20 +211,17 @@ contract GasRelayBase is GasRelayHelper {
         }
 
         // Clean up the transaction context
-        _clearAbstractedMsgSender();
+        _unlock(false);
     }
 
     /// @notice Modifier for gas abstraction via session keys
     /// @dev Handles detection of session keys, gas reimbursement, and task execution
     modifier GasAbstracted() {
         _checkForReentrancy();
-        _lock();
+        // NOTE: Locking is handled inside the _startShMonadGasAbstraction method.
 
         // Initialize gas abstraction tracking and identify session key
         GasAbstractionTracker memory gasAbstractionTracker = _startShMonadGasAbstraction(msg.sender);
-
-        // Set caller context for the duration of the transaction
-        _storeAbstractedMsgSender(gasAbstractionTracker.owner, gasAbstractionTracker.usingSessionKey);
 
         // Execute the intended function
         _;
@@ -236,7 +233,7 @@ contract GasRelayBase is GasRelayHelper {
         _finishShMonadGasAbstraction(gasAbstractionTracker);
 
         // Clean up the transaction context
-        _clearAbstractedMsgSender();
+        _unlock(false);
     }
 
     /// @notice Modifier that provides reentrancy protection
@@ -247,7 +244,7 @@ contract GasRelayBase is GasRelayHelper {
 
         _;
 
-        _clearAbstractedMsgSender();
+        _unlock(false);
     }
 
     /// @notice Get the abstracted msg.sender
@@ -258,12 +255,18 @@ contract GasRelayBase is GasRelayHelper {
         // which is a useful pattern if they still want to handle the gas reimbursement of a gas abstracted
         // transaction in scenarios in which the users' call would revert.
 
-        (address _msgSender, bool _isCallerSessionKey, bool _inUse) = _loadAbstractedMsgSenderData();
+        (address _underlyingMsgSender, bool _isCallerSessionKey, bool _inUse) = _loadUnderlyingMsgSenderData();
 
-        if (_isCallerSessionKey && _inUse && _msgSender != address(0)) {
-            return _msgSender;
+        if (!_isCallerSessionKey || !_inUse) {
+            return msg.sender;
         }
 
+        if (msg.sender == address(this) || msg.sender == _underlyingMsgSender) {
+            (address _owner, bool _valid) = _loadAbstractedMsgSenderData(_underlyingMsgSender);
+            if (_valid) {
+                return _owner;
+            }
+        }
         return msg.sender;
     }
 
@@ -280,7 +283,7 @@ contract GasRelayBase is GasRelayHelper {
     /// @notice Check if the current caller is a session key
     /// @return isSessionKey True if the caller is a session key
     function _isSessionKey() internal view returns (bool isSessionKey) {
-        (, isSessionKey,) = _loadAbstractedMsgSenderData();
+        (, isSessionKey,) = _loadUnderlyingMsgSenderData();
     }
 
     /// @notice Handles unused gas by executing tasks
@@ -321,7 +324,6 @@ contract GasRelayBase is GasRelayHelper {
     /// @return gasAbstractionTracker The gas abstraction tracker with initial data
     function _startShMonadGasAbstraction(address caller)
         internal
-        view
         returns (GasAbstractionTracker memory gasAbstractionTracker)
     {
         // NOTE: Assumes msg.sender is session key
@@ -335,6 +337,7 @@ contract GasRelayBase is GasRelayHelper {
                 startingGasLeft: gasleft() + _BASE_TX_GAS_USAGE + (msg.data.length * 16),
                 credits: 0
             });
+            _storeUnderlyingMsgSender(true);
         } else {
             gasAbstractionTracker = GasAbstractionTracker({
                 usingSessionKey: false,
@@ -344,6 +347,7 @@ contract GasRelayBase is GasRelayHelper {
                 startingGasLeft: gasleft() + _BASE_TX_GAS_USAGE + (msg.data.length * 16),
                 credits: 0
             });
+            _storeUnderlyingMsgSender(false);
         }
         return gasAbstractionTracker;
     }

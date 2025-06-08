@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import { Task, TaskMetadata } from "../types/TaskTypes.sol";
+import { Task, TaskMetadata, ScheduledTasks } from "../types/TaskTypes.sol";
 
 /// @title ITaskManager
 /// @notice User-facing interface for scheduling and managing automated task execution
@@ -74,13 +74,13 @@ interface ITaskManager {
     /// @return feesEarned Amount of fees earned from execution
     function executeTasks(address payoutAddress, uint256 targetGasReserve) external returns (uint256 feesEarned);
 
-    /// @notice Alerts whether or not a task is cancelled
-    /// @param taskId The id of the task to cancel
+    /// @notice Returns whether or not a task is cancelled
+    /// @param taskId The id of the task to check
     /// @return cancelled Bool for whether or not the task was cancelled
     function isTaskCancelled(bytes32 taskId) external view returns (bool cancelled);
 
-    /// @notice Alerts whether or not a task is cancelled
-    /// @param taskId The id of the task to cancel
+    /// @notice Returns whether or not a task has been executed
+    /// @param taskId The id of the task to check
     /// @return executed Bool for whether or not the task was executed
     function isTaskExecuted(bytes32 taskId) external view returns (bool executed);
 
@@ -90,16 +90,13 @@ interface ITaskManager {
     /// @return cost The estimated cost of the task
     function estimateCost(uint64 targetBlock, uint256 taskGasLimit) external view returns (uint256 cost);
 
-    /// @notice Get the earliest block number with scheduled tasks within the lookahead range
-    /// @dev Searches through all queues (Small, Medium, Large) using bitmap-based optimization.
-    ///      The function will revert if:
-    ///      1. lookahead > MAX_SCHEDULE_DISTANCE (business rule constraint)
-    ///      2. lookahead + block.number would overflow uint64 (technical constraint)
-    /// @param lookahead Number of blocks to look ahead from current block. Must not exceed MAX_SCHEDULE_DISTANCE
-    /// @return The earliest block number with tasks, or 0 if none found in range
-    /// @custom:throws TaskValidation_TargetBlockTooFar if lookahead > MAX_SCHEDULE_DISTANCE
-    /// @custom:throws LookaheadExceedsMaxScheduleDistance if lookahead + block.number would overflow
-    function getNextExecutionBlockInRange(uint64 lookahead) external view returns (uint64);
+    /// @notice Get a detailed schedule showing pending tasks broken down by individual blocks within the lookahead
+    /// range
+    /// @dev Each array element represents one block with its specific pending task counts (not cumulative)
+    /// @param lookahead Number of blocks to look ahead from current block
+    /// @return schedule An array where each entry contains pending task counts for a specific block
+    /// @custom:throws LookaheadExceedsMaxScheduleDistance if lookahead exceeds MAX_SCHEDULE_DISTANCE
+    function getTaskScheduleInRange(uint64 lookahead) external view returns (ScheduledTasks[] memory schedule);
 
     /// @notice Get metadata about a task
     /// @param taskId ID of the task to query

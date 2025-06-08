@@ -1,25 +1,19 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import { Task, Size, Depth, LoadBalancer, Tracker, Trackers, TaskMetadata } from "../types/TaskTypes.sol";
+import { OwnableUpgradeable } from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
+import { SafeTransferLib } from "@solady/utils/SafeTransferLib.sol";
+
 import { ITaskManager } from "../interfaces/ITaskManager.sol";
-import { IShMonad } from "../../shmonad/interfaces/IShMonad.sol";
-import { Directory } from "../../common/Directory.sol";
 import { TaskScheduler } from "./Scheduler.sol";
 import { TaskBits } from "../libraries/TaskBits.sol";
-import { TaskStorage } from "./Storage.sol";
-import { OwnableUpgradeable } from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
-import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
-
-import { SafeTransferLib } from "@solady/utils/SafeTransferLib.sol";
+import { TaskMetadata, Size, Trackers, Tracker, ScheduledTasks, Depth, LoadBalancer } from "../types/TaskTypes.sol";
 
 /// @title TaskManagerEntrypoint
 /// @notice Public interface for task management
 contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeable {
     using TaskBits for bytes32;
     using SafeTransferLib for address;
-
-    uint256 internal constant _MINIMUM_RESERVE = SMALL_GAS + ITERATION_BUFFER + 5000;
 
     /// @notice Constructor to set immutable variables
     /// @param shMonad The address of the shMonad contract
@@ -28,7 +22,7 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
 
     /// @notice Initialize the contract
     /// @param deployer The deployer of the contract
-    function initialize(address deployer) public reinitializer(4) {
+    function initialize(address deployer) public reinitializer(6) {
         __Ownable_init(deployer);
 
         // Initialize LoadBalancer with current block number
@@ -317,25 +311,149 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
     /// @inheritdoc ITaskManager
     /// @notice Get the earliest block number with scheduled tasks within the lookahead range
     /// @param lookahead Number of blocks to look ahead from current block
-    /// @return A block number with tasks, or 0 if none found in range
-    function getNextExecutionBlockInRange(uint64 lookahead) external view returns (uint64) {
+    /// @return schedule An array of the tasks scheduled for each block requested
+    function getTaskScheduleInRange(uint64 lookahead) external view returns (ScheduledTasks[] memory schedule) {
         // First check against MAX_SCHEDULE_DISTANCE
         if (lookahead > MAX_SCHEDULE_DISTANCE) {
             revert LookaheadExceedsMaxScheduleDistance(lookahead);
         }
 
-        uint64 _endBlock = uint64(block.number) + lookahead;
+        // Get the load balancer and determine most recently completed blocks
+        LoadBalancer memory _loadBalancer = S_loadBalancer;
+        uint256[] memory _sizeStartBlocks = new uint256[](_TOTAL_QUEUES);
+        _sizeStartBlocks[0] = uint256(_loadBalancer.activeBlockSmall);
+        _sizeStartBlocks[1] = uint256(_loadBalancer.activeBlockMedium);
+        _sizeStartBlocks[2] = uint256(_loadBalancer.activeBlockLarge);
 
-        // Use low-level staticcall to invoke the external function that will revert with data
-        (bool success, bytes memory returnData) =
-            address(this).staticcall(abi.encodeWithSignature("getNextExecutionBlockInRangeRevert(uint64)", _endBlock));
-        // If the call succeeded, it means no tasks were found (should return 0)
-        if (success) {
-            return 0;
+        // Sanity check the start blocks
+        for (uint256 s; s < _TOTAL_QUEUES; s++) {
+            if (_sizeStartBlocks[s] + MAX_SCHEDULE_DISTANCE < block.number) {
+                _sizeStartBlocks[s] = block.number - MAX_SCHEDULE_DISTANCE;
+            }
         }
 
-        // If the call failed with a revert, extract the block number from revert data
-        return _handleRevertData(returnData);
+        // Get the lowest block
+        uint256 blockNumber = uint256(
+            _sizeStartBlocks[0] < _sizeStartBlocks[1]
+                ? (_sizeStartBlocks[0] < _sizeStartBlocks[2] ? _sizeStartBlocks[0] : _sizeStartBlocks[2])
+                : (_sizeStartBlocks[1] < _sizeStartBlocks[2] ? _sizeStartBlocks[1] : _sizeStartBlocks[2])
+        );
+
+        // Init a tracker
+        Tracker memory _tracker;
+
+        {
+            // Some custom gas logic for rare init / cold start issues to prevent a hang due to gas limit
+            // CASE - check to see if we need to jump forwards
+            while (gasleft() / 25_000 < block.number + uint256(lookahead) - blockNumber) {
+                // Iterate through sizes
+                for (uint256 s; s < _TOTAL_QUEUES; s++) {
+                    // _TOTAL_QUEUES = 3 // small, medium, large task sizes
+                    uint256 d = 1; // 1=b
+                    bool _pinpointing = false;
+                    uint256 _bitmap;
+
+                    // loop through depths (3 = max depth levels)
+                    while (d < 3 && d > 0) {
+                        _tracker = S_metrics[Size(s)][Depth(d)][_sizeStartBlocks[s] / (_GROUP_SIZE ** (d - 1))];
+
+                        // CASE: Task available - zoom in
+                        if (_tracker.totalTasks > _tracker.executedTasks) {
+                            --d;
+                            _pinpointing = true;
+                            _bitmap = uint256(_tracker.bitmap);
+                            continue;
+                        }
+
+                        // CASE: No task available and not pinpointing (no bitmap available) so we zoom out
+                        if (!_pinpointing) {
+                            // Increment the starting block
+                            _sizeStartBlocks[s] +=
+                                (_GROUP_SIZE ** (d - 1) - (_sizeStartBlocks[s] % _GROUP_SIZE ** (d - 1)));
+                            ++d;
+
+                            // CASE: Tasks are available in higher group - use bitmap to skip ahead
+                        } else {
+                            _sizeStartBlocks[s] +=
+                                (_GROUP_SIZE ** (d - 1) - (_sizeStartBlocks[s] % _GROUP_SIZE ** (d - 1)));
+
+                            uint256 _blockGroupBit = (_sizeStartBlocks[s] % (_GROUP_SIZE ** (d)))
+                                / (_BITMAP_SPECIFICITY * (_GROUP_SIZE ** (d - 1)));
+                            if (_bitmap & (1 << _blockGroupBit) == 0) {
+                                _sizeStartBlocks[s] += (
+                                    _BITMAP_SPECIFICITY
+                                        - ((_blockGroupBit / _GROUP_SIZE ** (d - 1)) % _BITMAP_SPECIFICITY) - 1
+                                ) * (_GROUP_SIZE ** (d - 1));
+                            }
+                        }
+
+                        if (_sizeStartBlocks[s] > block.number) {
+                            _sizeStartBlocks[s] = block.number;
+                            break;
+                        }
+                    }
+
+                    blockNumber = uint256(
+                        _sizeStartBlocks[0] < _sizeStartBlocks[1]
+                            ? (_sizeStartBlocks[0] < _sizeStartBlocks[2] ? _sizeStartBlocks[0] : _sizeStartBlocks[2])
+                            : (_sizeStartBlocks[1] < _sizeStartBlocks[2] ? _sizeStartBlocks[1] : _sizeStartBlocks[2])
+                    );
+                }
+            }
+        }
+
+        // Build memory array for returndata
+        // NOTE: Blocks prior to current block are merged
+        schedule = new ScheduledTasks[](uint256(lookahead) + 1);
+        uint256 i;
+
+        // Iterate through blocks
+        while (blockNumber < block.number + lookahead) {
+            // Iterate through sizes
+            for (uint256 s; s < _TOTAL_QUEUES; s++) {
+                // _TOTAL_QUEUES = 3 // small, medium, large task sizes
+                // Skip if this size is already past the block number;
+                if (_sizeStartBlocks[s] > blockNumber) continue;
+
+                _tracker = S_metrics[Size(s)][Depth.B][blockNumber];
+
+                // Skip if there are no unexecuted tasks
+                if (_tracker.totalTasks == _tracker.executedTasks) continue;
+
+                unchecked {
+                    // Add any unpaid shares
+                    schedule[i].pendingSharesPayable +=
+                        uint256(_tracker.cumulativeFeesCollected - _tracker.cumulativeFeesPaid) * _FEE_SIG_FIG;
+
+                    // Add the unexecuted tasks to the count
+                    if (s == 0) {
+                        schedule[i].pendingSmallTasks += uint256(_tracker.totalTasks - _tracker.executedTasks);
+                    } else if (s == 1) {
+                        schedule[i].pendingMediumTasks += uint256(_tracker.totalTasks - _tracker.executedTasks);
+                    } else {
+                        // if (s == 2) {
+                        schedule[i].pendingLargeTasks += uint256(_tracker.totalTasks - _tracker.executedTasks);
+                    }
+                }
+            }
+
+            // Store and increment block number
+            unchecked {
+                if (blockNumber > block.number) {
+                    schedule[i++].blockNumber = blockNumber++;
+                } else if (blockNumber < block.number) {
+                    // If we haven't reached current block, don't store the 'past due' block number
+                    ++blockNumber;
+                } else {
+                    // if (blockNumber == block.number) {
+                    // Store 'past due' block as "1"
+                    schedule[i++].blockNumber = 1;
+                    ++blockNumber;
+                }
+            }
+        }
+
+        return schedule;
     }
 
     /// @inheritdoc ITaskManager

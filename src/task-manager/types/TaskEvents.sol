@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import { Task } from "./TaskTypes.sol";
-
 /// @title TaskEvents
 /// @notice Single source of truth for all task-related events
 contract TaskEvents {

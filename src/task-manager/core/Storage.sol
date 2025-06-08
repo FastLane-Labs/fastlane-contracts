@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import { IShMonad } from "../../shmonad/interfaces/IShMonad.sol";
 import { TaskBits } from "../libraries/TaskBits.sol";
-import { Size, Depth, Task, LoadBalancer, Tracker, TaskMetadata } from "../types/TaskTypes.sol";
 import { TaskEvents } from "../types/TaskEvents.sol";
 import { TaskErrors } from "../types/TaskErrors.sol";
+import { Size, Depth, LoadBalancer, Tracker, TaskMetadata } from "../types/TaskTypes.sol";
 
 /// @title TaskStorage
 /// @notice Core storage contract for task management system
@@ -21,13 +20,14 @@ abstract contract TaskStorage is TaskEvents, TaskErrors {
     uint256 internal constant _BITMAP_SPECIFICITY = 4;
     uint256 internal constant _MIN_ITERATION_GAS_REMAINER = 25_000;
     uint256 internal constant _BASE_FEE_COEFFICIENT = 8;
+    uint256 internal constant _TOTAL_QUEUES = 3; // Small, Medium, Large
 
     /// @notice Maximum distance (in blocks) that a task can be scheduled ahead (~3 weeks)
     uint64 public constant MAX_SCHEDULE_DISTANCE = uint64(_GROUP_SIZE) ** uint64(_MAX_GROUP_DEPTH);
 
     /// @notice Gas limits for different queue categories
     uint64 public constant SMALL_GAS = 100_000;
-    uint64 public constant MEDIUM_GAS = 250_000;
+    uint64 public constant MEDIUM_GAS = 300_000;
     uint64 public constant LARGE_GAS = 750_000;
     uint64 public constant ITERATION_BUFFER = 32_000;
 

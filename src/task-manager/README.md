@@ -113,21 +113,20 @@ interface ITaskManager {
         external returns (uint256 feesEarned);
     
     // Task Information
-    function getAccountNonce(address account) external view returns (uint64);
-    function estimateRequiredBond(
-        address implementation,
-        uint256 taskGasLimit,
-        uint64 targetBlock,
-        bytes calldata taskCallData
-    ) external view returns (uint256);
+    function estimateCost(uint64 targetBlock, uint256 taskGasLimit) external view returns (uint256 cost);
     function getTaskMetadata(bytes32 taskId) external view returns (TaskMetadata memory);
-    function getNextExecutionBlockInRange(uint64 startBlock, uint64 endBlock) external view returns (uint64);
+    function getTaskScheduleInRange(uint64 lookahead) external view returns (ScheduledTasks[] memory schedule);
+    
+    // Task Status
+    function isTaskCancelled(bytes32 taskId) external view returns (bool cancelled);
+    function isTaskExecuted(bytes32 taskId) external view returns (bool executed);
 }
 ```
 
 ## Task Structure
 
 Tasks are represented by a packed bytes32 identifier that contains:
+
 - Execution Environment Address: The deployed environment for the task
 - Scheduled Block Number & Index: To track the task's place in the queue
 - Task Size: Indicates gas requirements (Small, Medium, Large)
@@ -136,7 +135,7 @@ Tasks are represented by a packed bytes32 identifier that contains:
 ```solidity
 enum Size {
     Small,   // <= 100,000 gas
-    Medium,  // <= 250,000 gas
+    Medium,  // <= 300,000 gas
     Large    // <= 750,000 gas
 }
 
@@ -361,6 +360,7 @@ graph TD
 ## Execution Environment
 
 Tasks are executed in isolated environments:
+
 - Deterministic addressing using CREATE2
 - One environment per task
 - No persistent state
@@ -375,6 +375,32 @@ event ExecutionEnvironmentCreated(address indexed owner, address environment, ad
 event ExecutorReimbursed(address indexed executor, uint256 amount);
 event ProtocolFeeCollected(uint256 amount);
 ```
+
+## Task Schedule Monitoring
+
+The system provides detailed visibility into pending tasks across future blocks:
+
+```solidity
+// Get task schedule for next 10 blocks
+ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(10);
+
+// Each entry shows tasks for a specific block
+for (uint256 i = 0; i < schedule.length; i++) {
+    if (schedule[i].blockNumber > 0) {
+        console.log("Block", schedule[i].blockNumber);
+        console.log("  Small tasks:", schedule[i].pendingSmallTasks);
+        console.log("  Medium tasks:", schedule[i].pendingMediumTasks);
+        console.log("  Large tasks:", schedule[i].pendingLargeTasks);
+        console.log("  Total fees:", schedule[i].pendingSharesPayable);
+    }
+}
+```
+
+This enables:
+
+- **Executor Planning**: Find the most profitable blocks to target
+- **Load Monitoring**: Track system congestion and task distribution  
+- **Integration Logic**: Build sophisticated scheduling strategies
 
 ## Usage Example
 
@@ -407,6 +433,7 @@ event ProtocolFeeCollected(uint256 amount);
 ## Integration Guide
 
 For detailed instructions on integrating with the Task Manager system, including:
+
 - Task encoding patterns
 - Execution environment usage
 - Authorization models

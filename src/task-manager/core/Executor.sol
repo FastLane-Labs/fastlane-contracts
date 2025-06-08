@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+
 import { Task, Size, Depth, LoadBalancer, Tracker, Trackers } from "../types/TaskTypes.sol";
 import { TaskPricing } from "./Pricing.sol";
 import { TaskBits } from "../libraries/TaskBits.sol";
-import { IShMonad } from "../../shmonad/interfaces/IShMonad.sol";
-import { Directory } from "../../common/Directory.sol";
 import { TaskAccountingMath } from "../libraries/TaskAccountingMath.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title TaskExecutor
 /// @notice Handles task execution and fee distribution
@@ -185,6 +184,7 @@ abstract contract TaskExecutor is TaskPricing {
             // Execute
             if (!cancelled) {
                 T_currentTaskId = taskId;
+                // aderyn-ignore-next-line(unchecked-low-level-call)
                 environment.call{ gas: _maxGasFromSize(taskSize) }("task");
 
                 // Reload trackers and finish scheduling in case of reschedule

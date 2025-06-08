@@ -5,11 +5,13 @@ This guide explains how to integrate with the Task Manager system, covering enco
 ## Task Encoding Pattern
 
 Tasks must use a 3-layer encoding pattern:
+
 1. Encode the actual function call to your target contract.
 2. Pack the target address and calldata together.
 3. Encode the call to the execution environment's function (e.g., `executeTask`).
 
 Example:
+
 ```solidity
 // 1. Encode the actual function call to your target contract
 bytes memory functionCall = abi.encodeWithSelector(
@@ -42,7 +44,7 @@ taskManager.scheduleTask(
 
 Note that different execution environments may require specific encoding patterns or additional parameters. Always refer to the specific environment's documentation for exact encoding requirements.
 
-# Task Manager Advanced Features & Examples
+## Task Manager Advanced Features & Examples
 
 This section contains detailed documentation and example implementations for advanced Task Manager features. While the root README covers basic usage, here we explore:
 
@@ -65,6 +67,7 @@ A task environment that implements automatic retry logic for failed tasks. Featu
 - Built-in input validation
 
 Usage example:
+
 ```solidity
 // Deploy the environment
 ReschedulingTaskEnvironment env = new ReschedulingTaskEnvironment(taskManagerAddress);
@@ -80,6 +83,7 @@ taskManager.scheduleTask(
 ```
 
 Events emitted:
+
 - `TaskStarted(address target, bytes data)`
 - `TaskCompleted(address target, bool success)`
 - `TaskRescheduled(address target, uint64 newTargetBlock)`
@@ -90,6 +94,7 @@ Events emitted:
 Location: `BasicTaskEnvironment.sol`
 
 A helper environment that provides pre-execution validation and execution logging. Features:
+
 - Input validation (non-zero address, non-empty calldata)
 - Detailed event emission
 - Error propagation from failed calls
@@ -159,6 +164,7 @@ function removeEnvironmentCanceller(bytes32 taskId, address canceller) external 
 #### Authorization Hierarchy
 
 The system implements a hierarchical authorization model:
+
 1. Task Owner: Has full control over the task
 2. Environment Cancellers: Can cancel any task in their authorized environment
 3. Task Cancellers: Can only cancel specific authorized tasks
@@ -214,16 +220,18 @@ contract TaskExecutionBase {
 ```
 
 2. **Environment-Level Controls** (Additional Safety):
+
    - EEs can implement additional security measures
    - Input validation
    - Custom access controls
    - Execution flow restrictions
 
 Key security features:
-1. **Airgapped Execution**: Tasks execute in isolated environments to prevent cross-task interference
-2. **Proxy Protection**: The proxy pattern ensures only `executeTask` can be called, and only by the Task Manager
-3. **Customizable Security**: Each EE can add its own security measures while maintaining core protections
-4. **No State Dependencies**: EEs should be stateless between executions
+
+- **Airgapped Execution**: Tasks execute in isolated environments to prevent cross-task interference
+- **Proxy Protection**: The proxy pattern ensures only `executeTask` can be called, and only by the Task Manager
+- **Customizable Security**: Each EE can add its own security measures while maintaining core protections
+- **No State Dependencies**: EEs should be stateless between executions
 
 ### Minimal Secure Environment
 
@@ -263,6 +271,7 @@ taskManager.scheduleTask(
 1. **Post-Execution Control**:
    - Instead of modifying the EE, implement control flow in your target contract
    - Example:
+
    ```solidity
    contract MyTarget {
        function executeWithPostChecks(uint256 value) external {
@@ -351,6 +360,7 @@ To create your own execution environment:
    - State management
 
 Example template:
+
 ```solidity
 contract CustomTaskEnvironment is TaskExecutionBase {
     constructor(address taskManager_) TaskExecutionBase(taskManager_) {}
@@ -373,4 +383,4 @@ contract CustomTaskEnvironment is TaskExecutionBase {
         return success;
     }
 }
-``` 
+```

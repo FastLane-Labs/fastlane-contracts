@@ -106,3 +106,11 @@ struct Trackers {
     /// @notice Division-level tracker
     Tracker d;
 }
+
+struct ScheduledTasks {
+    uint256 blockNumber;
+    uint256 pendingSmallTasks;
+    uint256 pendingMediumTasks;
+    uint256 pendingLargeTasks;
+    uint256 pendingSharesPayable; // NOTE: Fees collected (shares payable) > reward received by executor
+}

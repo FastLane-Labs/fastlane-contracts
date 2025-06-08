@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.28;
 
-import { SafeTransferLib } from "@solady/utils/SafeTransferLib.sol";
-
 /// @title TaskExecutionBase
 /// @notice Base contract for task execution environments with common functionality
+/// @dev This is a base contract for task execution environments with common functionality
 abstract contract TaskExecutionBase {
     /// @notice The task manager contract
     address internal immutable TASK_MANAGER;

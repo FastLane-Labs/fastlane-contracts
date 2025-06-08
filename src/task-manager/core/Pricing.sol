@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
-import { TaskMetadata, Size, Depth, LoadBalancer, Tracker, Trackers } from "../types/TaskTypes.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+
+import { Size, Trackers } from "../types/TaskTypes.sol";
 import { TaskLoadBalancer } from "./LoadBalancer.sol";
 import { IShMonad } from "../../shmonad/interfaces/IShMonad.sol";
-import { TaskAccountingMath } from "../libraries/TaskAccountingMath.sol";
-import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title TaskPricing
 /// @notice Handles fee calculations and pricing for task execution

@@ -19,7 +19,7 @@ contract MockTarget {
 contract TaskManagerTestHelper is BaseTest {
     /// @notice Gas limits for different queue categories
     uint64 public constant SMALL_GAS = 100_000;
-    uint64 public constant MEDIUM_GAS = 250_000;
+    uint64 public constant MEDIUM_GAS = 300_000;
     uint64 public constant LARGE_GAS = 750_000;
     uint64 public constant _BLOCK_GROUP_SIZE = 4;
 

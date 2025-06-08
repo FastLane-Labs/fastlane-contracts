@@ -3,7 +3,7 @@ pragma solidity 0.8.28;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import { Task, Size, TaskMetadata, LoadBalancer } from "../../src/task-manager/types/TaskTypes.sol";
+import { Task, Size, TaskMetadata, LoadBalancer, ScheduledTasks } from "../../src/task-manager/types/TaskTypes.sol";
 import { TaskManagerEntrypoint } from "../../src/task-manager/core/Entrypoint.sol";
 import { ITaskExecutionEnvironment } from "../../src/task-manager/interfaces/IExecutionEnvironment.sol";
 import { TaskBits } from "../../src/task-manager/libraries/TaskBits.sol";
@@ -233,146 +233,6 @@ contract TaskManagerEntrypointTest is TaskManagerTestHelper {
         uint64 farFutureBlock = uint64(block.number + taskManager.MAX_SCHEDULE_DISTANCE()+1); // Assuming _GROUP_SIZE < 300
         vm.expectRevert(abi.encodeWithSelector(TaskErrors.TaskValidation_TargetBlockTooFar.selector, farFutureBlock, block.number));
         (,, taskId) = taskManager.scheduleTask(task.implementation, _maxGasFromSize(task.size), farFutureBlock, type(uint256).max / 2, task.data);
-
-        vm.stopPrank();
-    }
-
-    function testGetNextExecutionBlockInRange() public {
-        // Setup - schedule tasks at different blocks
-        vm.startPrank(user);
-        
-        // Get current block and use relative offsets
-        uint64 currentBlock = uint64(block.number);
-        
-        
-        // Schedule first task at currentBlock + 2
-        Task memory task1 = _createTask(user, 1, Size.Small);
-        // Get the cost estimate
-        uint256 estimatedCost = taskManager.estimateCost(currentBlock + 2, _maxGasFromSize(task1.size));
-        taskManager.scheduleTask{ value: estimatedCost }(task1.implementation, _maxGasFromSize(task1.size), currentBlock + 2, type(uint256).max / 2, task1.data);
-
-        // Schedule second task at currentBlock + 5
-        Task memory task2 = _createTask(user, 2, Size.Small);
-        estimatedCost = taskManager.estimateCost(currentBlock + 5, _maxGasFromSize(task2.size));
-        taskManager.scheduleTask{ value: estimatedCost }(task2.implementation, _maxGasFromSize(task2.size), currentBlock + 5, type(uint256).max / 2, task2.data);
-
-        // Calculate expected block numbers - should return the exact block where tasks are scheduled
-        uint64 firstTaskBlock = currentBlock + 2;  // first task block
-        uint64 secondTaskBlock = currentBlock + 5; // second task block
-
-        // Test cases
-        // Case 1: Search with lookahead of 10 blocks, should return first task block
-        uint64 block1 = taskManager.getNextExecutionBlockInRange(10);
-
-        // Case 2: Search with lookahead of 10 blocks, should still return first task block
-        uint64 block2 = taskManager.getNextExecutionBlockInRange(10);
-
-        // Roll forward and execute tasks at firstTaskBlock
-        vm.roll(firstTaskBlock + 1);
-        taskManager.executeTasks(payout, 0);
-
-        // Case 3: After executing first task, search with lookahead of 10 blocks, should return second task block
-        uint64 block3 = taskManager.getNextExecutionBlockInRange(10);
-
-        // Roll forward and execute tasks at secondTaskBlock
-        vm.roll(secondTaskBlock + 1);
-        taskManager.executeTasks(payout, 0);
-
-        // Case 4: After executing all tasks, search with lookahead of 10 blocks, should return 0
-        uint64 block4 = taskManager.getNextExecutionBlockInRange(10);
-
-        // Edge cases
-        // Case 5: Search with lookahead of 3 blocks, should return 0 (no tasks within lookahead)
-        uint64 block5 = taskManager.getNextExecutionBlockInRange(3);
-
-        // Case 6: Search with lookahead of 1 block, should return 0 (no tasks in immediate future)
-        uint64 block6 = taskManager.getNextExecutionBlockInRange(1);
-
-        assertEq(block1, firstTaskBlock, "Should return first task block for lookahead of 10");
-        assertEq(block2, firstTaskBlock, "Should still return first task block for lookahead of 10");
-        assertEq(block3, secondTaskBlock, "Should return second task block after executing first task");
-        assertEq(block4, 0, "Should return 0 after executing all tasks");
-        assertEq(block5, 0, "Should return 0 when no tasks within lookahead");
-        assertEq(block6, 0, "Should return 0 for small lookahead");
-
-        // Case 7: Test reversion when lookahead exceeds MAX_SCHEDULE_DISTANCE
-        uint64 tooLargeLookahead = taskManager.MAX_SCHEDULE_DISTANCE() + 1;
-        vm.expectRevert(abi.encodeWithSelector(
-            TaskErrors.LookaheadExceedsMaxScheduleDistance.selector,
-            tooLargeLookahead
-        ));
-        taskManager.getNextExecutionBlockInRange(tooLargeLookahead);
-
-        // Case 8: Test reversion when lookahead would cause overflow
-        uint64 maxLookahead = type(uint64).max - uint64(block.number) + 1;
-        vm.expectRevert(abi.encodeWithSelector(
-            TaskErrors.LookaheadExceedsMaxScheduleDistance.selector,
-            maxLookahead
-        ));
-        taskManager.getNextExecutionBlockInRange(maxLookahead);
-
-        vm.stopPrank();
-    }
-
-    function testGetNextExecutionBlockInRangeComprehensive() public {
-        vm.startPrank(user);
-        
-        // Get current block and use relative offsets
-        uint64 currentBlock = uint64(block.number);
-
-        // Target blocks for tasks - use relative offsets
-        uint64 block2 = currentBlock + 2;  // +2 blocks from current
-        uint64 block5 = currentBlock + 5;  // +5 blocks from current
-        uint64 block10 = currentBlock + 10; // +10 blocks from current
-        uint64 block15 = currentBlock + 15; // +15 blocks from current
-
-        // Schedule tasks in any order - should still always find earliest block
-        _scheduleTask(user, 1, Size.Small, block2);
-        _scheduleTask(user, 2, Size.Small, block5);
-        _scheduleTask(user, 3, Size.Medium, block10);
-        _scheduleTask(user, 4, Size.Large, block15);
-
-        // Should always find block2 first as it's earliest, regardless of scheduling order
-        assertEq(taskManager.getNextExecutionBlockInRange(20), block2, "Should find earliest task at block+2");
-        assertEq(taskManager.getNextExecutionBlockInRange(20), block2, "Should still find block+2 when starting at block+2");
-        assertEq(taskManager.getNextExecutionBlockInRange(20), block2, "Should still find block+2 when starting after it");
-
-        // Roll forward relative to current block and execute tasks at block2
-        vm.roll(block2 + 1);
-        taskManager.executeTasks(payout, 0);
-
-        // After executing block2, should now find block5
-        assertEq(taskManager.getNextExecutionBlockInRange(20), block5, "Should find block+5 after executing block+2");
-        assertEq(taskManager.getNextExecutionBlockInRange(20), block5, "Should find block+5 when starting between executed and next");
-        assertEq(taskManager.getNextExecutionBlockInRange(20), block5, "Should find block+5 when starting at it");
-
-        // Roll forward and execute tasks at block5
-        vm.roll(block5 + 1);
-        taskManager.executeTasks(payout, 0);
-
-        // After executing block5, should now find block10
-        assertEq(taskManager.getNextExecutionBlockInRange(20), block10, "Should find block+10 after executing block+5");
-        assertEq(taskManager.getNextExecutionBlockInRange(20), block10, "Should find block+10 when starting between executed and next");
-
-        // Roll forward and execute tasks at block10
-        vm.roll(block10 + 1);
-        taskManager.executeTasks(payout, 0);
-
-        // After executing block10, should now find block15
-        assertEq(taskManager.getNextExecutionBlockInRange(20), block15, "Should find block+15 after executing block+10");
-        assertEq(taskManager.getNextExecutionBlockInRange(20), block15, "Should find block+15 when starting between executed and next");
-
-        // Roll forward and execute tasks at block15
-        vm.roll(block15 + 1);
-        taskManager.executeTasks(payout, 0);
-
-        // After executing all tasks, should find nothing
-        assertEq(taskManager.getNextExecutionBlockInRange(20), 0, "Should find no tasks after executing all");
-
-        // Edge cases remain valid
-        assertEq(taskManager.getNextExecutionBlockInRange(10), 0, "Should find no tasks after all tasks");
-        assertEq(taskManager.getNextExecutionBlockInRange(5), 0, "Should return 0 for small lookahead");
-        assertEq(taskManager.getNextExecutionBlockInRange(10), 0, "Should return 0 for range with no tasks");
 
         vm.stopPrank();
     }
@@ -695,6 +555,393 @@ contract TaskManagerEntrypointTest is TaskManagerTestHelper {
             assertTrue(taskManager.isTaskExecuted(taskIds[i]), string.concat("Task ", vm.toString(i), " should be executed"));
         }
 
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangeBasicFunctionality() public {
+        vm.startPrank(user);
+        
+        uint64 currentBlock = uint64(block.number);
+        
+        // Schedule tasks at different blocks
+        _scheduleTask(user, 1, Size.Small, currentBlock + 2);
+        _scheduleTask(user, 2, Size.Medium, currentBlock + 5);
+        _scheduleTask(user, 3, Size.Large, currentBlock + 8);
+        _scheduleTask(user, 4, Size.Small, currentBlock + 8); // Same block as task 3
+        
+        // Get schedule for next 10 blocks
+        ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(10);
+        
+        // Verify schedule length (should be lookahead + 1)
+        assertEq(schedule.length, 11, "Schedule should have 11 elements (0-10)");
+        
+        // Verify task counts at specific blocks
+        assertEq(schedule[2].pendingSmallTasks, 1, "Should have 1 small task at block+2");
+        assertEq(schedule[5].pendingMediumTasks, 1, "Should have 1 medium task at block+5");
+        assertEq(schedule[8].pendingLargeTasks, 1, "Should have 1 large task at block+8");
+        assertEq(schedule[8].pendingSmallTasks, 1, "Should have 1 small task at block+8");
+        
+        // Verify block numbers
+        assertEq(schedule[2].blockNumber, currentBlock + 2, "Block number should match");
+        assertEq(schedule[5].blockNumber, currentBlock + 5, "Block number should match");
+        assertEq(schedule[8].blockNumber, currentBlock + 8, "Block number should match");
+        
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangeEmptySchedule() public view {
+        // Get schedule with no tasks scheduled
+        ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(20);
+        
+        // Verify schedule length
+        assertEq(schedule.length, 21, "Schedule should have 21 elements");
+        
+        // Verify all entries are empty
+        for (uint256 i = 0; i < schedule.length; i++) {
+            assertEq(schedule[i].pendingSmallTasks, 0, "Should have no small tasks");
+            assertEq(schedule[i].pendingMediumTasks, 0, "Should have no medium tasks");
+            assertEq(schedule[i].pendingLargeTasks, 0, "Should have no large tasks");
+            assertEq(schedule[i].pendingSharesPayable, 0, "Should have no pending shares");
+        }
+    }
+
+    function testGetTaskScheduleInRangeMaxLookahead() public {
+        vm.startPrank(user);
+        
+        uint64 maxLookahead = taskManager.MAX_SCHEDULE_DISTANCE();
+        uint64 currentBlock = uint64(block.number);
+        
+        // Test with a reasonable lookahead that won't cause memory issues
+        uint64 testLookahead = 300; // Practical lookahead for testing
+        
+        // Schedule a task within the test range
+        _scheduleTask(user, 1, Size.Small, currentBlock + testLookahead - 10);
+        
+        // Should not revert
+        ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(testLookahead);
+        
+        // Verify schedule was returned
+        assertEq(schedule.length, uint256(testLookahead) + 1, "Schedule should include all blocks");
+        
+        // Also verify that MAX_SCHEDULE_DISTANCE is indeed very large
+        assertGt(maxLookahead, 1_000_000, "MAX_SCHEDULE_DISTANCE should be over 1 million blocks");
+        
+        // In practice, no one would look ahead millions of blocks
+        // The function correctly validates the input but actually using max lookahead
+        // would be impractical due to memory constraints
+        
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangeExceedsMaxLookahead() public {
+        uint64 tooLargeLookahead = taskManager.MAX_SCHEDULE_DISTANCE() + 1;
+        
+        vm.expectRevert(abi.encodeWithSelector(
+            TaskErrors.LookaheadExceedsMaxScheduleDistance.selector,
+            tooLargeLookahead
+        ));
+        taskManager.getTaskScheduleInRange(tooLargeLookahead);
+    }
+
+    function testGetTaskScheduleInRangeLookaheadOverflow() public {
+        // Test with lookahead that would cause overflow
+        uint64 maxLookahead = type(uint64).max - uint64(block.number) + 1;
+        
+        vm.expectRevert(abi.encodeWithSelector(
+            TaskErrors.LookaheadExceedsMaxScheduleDistance.selector,
+            maxLookahead
+        ));
+        taskManager.getTaskScheduleInRange(maxLookahead);
+    }
+
+    function testGetTaskScheduleInRangeMixedTaskSizes() public {
+        vm.startPrank(user);
+        
+        uint64 currentBlock = uint64(block.number);
+        uint64 targetBlock = currentBlock + 5;
+        
+        // Schedule multiple tasks of different sizes at the same block
+        _scheduleTask(user, 1, Size.Small, targetBlock);
+        _scheduleTask(user, 2, Size.Small, targetBlock);
+        _scheduleTask(user, 3, Size.Medium, targetBlock);
+        _scheduleTask(user, 4, Size.Large, targetBlock);
+        _scheduleTask(user, 5, Size.Large, targetBlock);
+        _scheduleTask(user, 6, Size.Large, targetBlock);
+        
+        // Get schedule
+        ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(10);
+        
+        // Verify counts at target block
+        assertEq(schedule[5].pendingSmallTasks, 2, "Should have 2 small tasks");
+        assertEq(schedule[5].pendingMediumTasks, 1, "Should have 1 medium task");
+        assertEq(schedule[5].pendingLargeTasks, 3, "Should have 3 large tasks");
+        assertEq(schedule[5].blockNumber, targetBlock, "Block number should match");
+        
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangePastDueTasks() public {
+        vm.startPrank(user);
+        
+        uint64 currentBlock = uint64(block.number);
+        
+        // Schedule tasks for future blocks
+        _scheduleTask(user, 1, Size.Small, currentBlock + 2); // Will become past due
+        _scheduleTask(user, 2, Size.Medium, currentBlock + 5); // Future
+        
+        // Roll forward past first task's block so it becomes past due
+        vm.roll(currentBlock + 3);
+        
+        // Get schedule
+        ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(5);
+        
+        // Past due tasks should be in first element with blockNumber = 1
+        assertEq(schedule[0].blockNumber, 1, "Past due tasks should have blockNumber = 1");
+        assertEq(schedule[0].pendingSmallTasks, 1, "Should have 1 past due small task");
+        
+        // Future task should be at correct position
+        assertEq(schedule[2].blockNumber, currentBlock + 5, "Future task block should be correct");
+        assertEq(schedule[2].pendingMediumTasks, 1, "Should have 1 future medium task");
+        
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangeDenseScheduling() public {
+        vm.startPrank(user);
+        
+        uint64 currentBlock = uint64(block.number);
+        
+        // Schedule multiple tasks per block for 5 consecutive blocks
+        for (uint64 i = 1; i <= 5; i++) {
+            uint64 targetBlock = currentBlock + i;
+            _scheduleTask(user, i * 3 - 2, Size.Small, targetBlock);
+            _scheduleTask(user, i * 3 - 1, Size.Small, targetBlock);
+            _scheduleTask(user, i * 3, Size.Medium, targetBlock);
+        }
+        
+        // Get schedule
+        ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(5);
+        
+        // Verify each block has correct counts
+        bool foundTasks = false;
+        for (uint256 i = 0; i < schedule.length; i++) {
+            if (schedule[i].blockNumber >= currentBlock + 1 && schedule[i].blockNumber <= currentBlock + 5) {
+                foundTasks = true;
+                uint256 blockOffset = schedule[i].blockNumber - currentBlock;
+                assertEq(schedule[i].pendingSmallTasks, 2, string.concat("Block ", vm.toString(blockOffset), " should have 2 small tasks"));
+                assertEq(schedule[i].pendingMediumTasks, 1, string.concat("Block ", vm.toString(blockOffset), " should have 1 medium task"));
+            }
+        }
+        assertTrue(foundTasks, "Should find scheduled tasks in the range");
+        
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangeSparseScheduling() public {
+        vm.startPrank(user);
+        
+        uint64 currentBlock = uint64(block.number);
+        
+        // Schedule tasks with large gaps
+        _scheduleTask(user, 1, Size.Small, currentBlock + 10);
+        _scheduleTask(user, 2, Size.Medium, currentBlock + 50);
+        _scheduleTask(user, 3, Size.Large, currentBlock + 90);
+        
+        // Get schedule for 100 blocks
+        ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(100);
+        
+        // Verify only specific blocks have tasks
+        assertEq(schedule[10].pendingSmallTasks, 1, "Block+10 should have 1 small task");
+        assertEq(schedule[50].pendingMediumTasks, 1, "Block+50 should have 1 medium task");
+        assertEq(schedule[90].pendingLargeTasks, 1, "Block+90 should have 1 large task");
+        
+        // Verify most blocks are empty
+        uint256 nonEmptyBlocks = 0;
+        for (uint256 i = 0; i < schedule.length; i++) {
+            if (schedule[i].pendingSmallTasks > 0 || 
+                schedule[i].pendingMediumTasks > 0 || 
+                schedule[i].pendingLargeTasks > 0) {
+                nonEmptyBlocks++;
+            }
+        }
+        assertEq(nonEmptyBlocks, 3, "Should only have 3 non-empty blocks");
+        
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangeZeroLookahead() public {
+        vm.startPrank(user);
+        
+        uint64 currentBlock = uint64(block.number);
+        
+        // Schedule a task for near future (will be past due after roll)
+        _scheduleTask(user, 1, Size.Small, currentBlock + 1);
+        
+        // Roll forward so task is past due
+        vm.roll(currentBlock + 2);
+        
+        // Get schedule with zero lookahead
+        ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(0);
+        
+        // Should return array with single element
+        assertEq(schedule.length, 1, "Should have single element");
+        
+        // With lookahead=0, we only get current block data
+        // The past due task shows up in the current block's data
+        assertEq(schedule[0].blockNumber, 0, "Current block data should have blockNumber 0");
+        assertEq(schedule[0].pendingSmallTasks, 1, "Should have 1 past due task in current block");
+        assertTrue(schedule[0].pendingSharesPayable > 0, "Should have pending shares for the task");
+        
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangePendingShares() public {
+        vm.startPrank(user);
+        
+        uint64 currentBlock = uint64(block.number);
+        
+        // Schedule multiple tasks to accumulate fees
+        for (uint i = 1; i <= 5; i++) {
+            _scheduleTask(user, uint64(i), Size.Large, currentBlock + 2);
+        }
+        
+        // Get schedule
+        ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(5);
+        
+        // Verify pending shares are calculated
+        assertTrue(schedule[2].pendingSharesPayable > 0, "Should have pending shares payable");
+        assertEq(schedule[2].pendingLargeTasks, 5, "Should have 5 large tasks");
+        
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangeAfterExecution() public {
+        vm.startPrank(user);
+        
+        uint64 currentBlock = uint64(block.number);
+        uint64 targetBlock = currentBlock + 2;
+        
+        // Schedule multiple tasks
+        bytes32 taskId1 = _scheduleTask(user, 1, Size.Small, targetBlock);
+        bytes32 taskId2 = _scheduleTask(user, 2, Size.Small, targetBlock);
+        bytes32 taskId3 = _scheduleTask(user, 3, Size.Small, targetBlock);
+        
+        // Get initial schedule
+        ScheduledTasks[] memory scheduleBefore = taskManager.getTaskScheduleInRange(5);
+        assertEq(scheduleBefore[2].pendingSmallTasks, 3, "Should have 3 tasks before execution");
+        
+        // Execute tasks
+        vm.roll(targetBlock + 1);
+        taskManager.executeTasks(payout, 0);
+        
+        // Get schedule after execution
+        ScheduledTasks[] memory scheduleAfter = taskManager.getTaskScheduleInRange(5);
+        assertEq(scheduleAfter[2].pendingSmallTasks, 0, "Should have 0 tasks after execution");
+        
+        // Verify tasks were executed
+        assertTrue(taskManager.isTaskExecuted(taskId1), "Task 1 should be executed");
+        assertTrue(taskManager.isTaskExecuted(taskId2), "Task 2 should be executed");
+        assertTrue(taskManager.isTaskExecuted(taskId3), "Task 3 should be executed");
+        
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangeAfterCancellation() public {
+        vm.startPrank(user);
+        
+        uint64 currentBlock = uint64(block.number);
+        uint64 targetBlock = currentBlock + 2;
+        
+        // Schedule multiple tasks
+        bytes32 taskId1 = _scheduleTask(user, 1, Size.Small, targetBlock);
+        bytes32 taskId2 = _scheduleTask(user, 2, Size.Small, targetBlock);
+        bytes32 taskId3 = _scheduleTask(user, 3, Size.Small, targetBlock);
+        
+        // Get initial schedule
+        ScheduledTasks[] memory scheduleBefore = taskManager.getTaskScheduleInRange(5);
+        assertEq(scheduleBefore[2].pendingSmallTasks, 3, "Should have 3 tasks before cancellation");
+        
+        // Cancel one task
+        taskManager.cancelTask(taskId2);
+        
+        // Get schedule after cancellation
+        ScheduledTasks[] memory scheduleAfter = taskManager.getTaskScheduleInRange(5);
+        assertEq(scheduleAfter[2].pendingSmallTasks, 3, "Cancelled tasks still count as pending");
+        
+        // Execute remaining tasks
+        vm.roll(targetBlock + 1);
+        taskManager.executeTasks(payout, 0);
+        
+        // Verify execution status
+        assertTrue(taskManager.isTaskExecuted(taskId1), "Task 1 should be executed");
+        assertFalse(taskManager.isTaskExecuted(taskId2), "Task 2 should not be executed (cancelled)");
+        assertTrue(taskManager.isTaskExecuted(taskId3), "Task 3 should be executed");
+        
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangeLoadBalancerState() public {
+        vm.startPrank(user);
+        
+        // Get initial load balancer state
+        (uint64 initialSmall, uint64 initialMedium, uint64 initialLarge,,) = taskManager.S_loadBalancer();
+        
+        uint64 currentBlock = uint64(block.number);
+        
+        // Schedule tasks at different blocks for different sizes
+        _scheduleTask(user, 1, Size.Small, currentBlock + 2);
+        _scheduleTask(user, 2, Size.Medium, currentBlock + 5);
+        _scheduleTask(user, 3, Size.Large, currentBlock + 8);
+        
+        // Get schedule - should start from lowest active block
+        ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(10);
+        
+        // Verify schedule includes all tasks
+        assertEq(schedule[2].pendingSmallTasks, 1, "Should find small task");
+        assertEq(schedule[5].pendingMediumTasks, 1, "Should find medium task");
+        assertEq(schedule[8].pendingLargeTasks, 1, "Should find large task");
+        
+        // Execute small tasks and verify load balancer updates
+        vm.roll(currentBlock + 3);
+        taskManager.executeTasks(payout, 0);
+        
+        (uint64 newSmall,,,,) = taskManager.S_loadBalancer();
+        assertTrue(newSmall > initialSmall, "Small task pointer should advance");
+        
+        vm.stopPrank();
+    }
+
+    function testGetTaskScheduleInRangeGasOptimization() public {
+        vm.startPrank(user);
+        
+        uint64 currentBlock = uint64(block.number);
+        
+        // Schedule many tasks across a wide range to test gas optimization
+        for (uint i = 0; i < 50; i++) {
+            uint64 targetBlock = currentBlock + 2 + uint64(i * 6); // Start at +2 and spread tasks every 6 blocks
+            _scheduleTask(user, uint64(i + 1), Size.Small, targetBlock);
+        }
+        
+        // Measure gas for large lookahead
+        uint256 gasBefore = gasleft();
+        ScheduledTasks[] memory schedule = taskManager.getTaskScheduleInRange(300);
+        uint256 gasUsed = gasBefore - gasleft();
+        
+        // Verify function completed and found tasks
+        assertEq(schedule.length, 301, "Should return full schedule");
+        
+        // Count non-empty blocks
+        uint256 nonEmptyBlocks = 0;
+        for (uint256 i = 0; i < schedule.length; i++) {
+            if (schedule[i].pendingSmallTasks > 0) {
+                nonEmptyBlocks++;
+            }
+        }
+        
+        // Should find approximately 50 blocks with tasks
+        assertTrue(nonEmptyBlocks >= 45, "Should find most scheduled tasks");
+        assertTrue(gasUsed < 5_000_000, "Should use reasonable amount of gas");
+        
         vm.stopPrank();
     }
 } 
