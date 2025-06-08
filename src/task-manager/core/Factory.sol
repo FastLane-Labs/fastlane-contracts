@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import { TaskExecutionEnvironment } from "../common/ExecutionEnvironment.sol";
-import { TaskEnvironmentMimic } from "../common/EnvironmentMimic.sol";
 
 /// @title TaskFactory
 /// @notice Factory for creating task execution environments

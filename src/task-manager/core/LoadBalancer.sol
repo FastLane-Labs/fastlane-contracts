@@ -857,46 +857,6 @@ abstract contract TaskLoadBalancer is TaskStorage {
     }
 
     /**
-     * @notice External function that always reverts with the next execution block
-     * @dev This function is meant to be called via staticcall. It always reverts with
-     * a NextExecutionBlock error containing the block number or 0 if none found.
-     * @param endBlock The upper bound block number to search until (exclusive)
-     */
-    function getNextExecutionBlockInRangeRevert(uint64 endBlock) external {
-        uint256 _targetGasReserve = _MIN_ITERATION_GAS_REMAINER;
-
-        uint64 _candidate;
-        bool _tasksAvailable; // Track if we found any tasks
-
-        // Initialize trackers
-        Trackers memory _trackers = _initTrackers(_targetGasReserve);
-
-        uint256 _minLeftoverGas = ITERATION_BUFFER + _targetGasReserve + 5000;
-
-        // Process queues while we have gas
-        do {
-            // search the current queue
-            _trackers = _searchInQueue(_trackers, _targetGasReserve, endBlock);
-            // OR the existing tasksAvailable with the new one
-            _tasksAvailable = _tasksAvailable || _trackers.tasksAvailable;
-
-            if (_candidate == 0 || _candidate > _trackers.blockNumber) {
-                _candidate = _trackers.blockNumber;
-            }
-
-            // Break already if we're on the small queue and there are no more tasks available
-            if (_trackers.size == Size.Small) {
-                break;
-            }
-            // Try to reallocate to a different queue
-            _trackers = _reallocateLoad(_trackers);
-        } while (gasleft() > _minLeftoverGas);
-
-        // Always revert with the candidate block number or 0 if no tasks are available
-        revert TaskErrors.NextExecutionBlock(_tasksAvailable ? _candidate : 0);
-    }
-
-    /**
      * @notice Calculates group factor for a given depth level
      * @dev Returns the block grouping factor for each depth:
      * - B (Block): 1 (individual blocks)

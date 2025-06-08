@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
+import { SafeTransferLib } from "@solady/utils/SafeTransferLib.sol";
 import { NoncesUpgradeable } from "@openzeppelin-upgradeable/contracts/utils/NoncesUpgradeable.sol";
-import { IShMonad } from "../../shmonad/interfaces/IShMonad.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
-import { Directory } from "../../common/Directory.sol";
+
+import { IShMonad } from "../../shmonad/interfaces/IShMonad.sol";
 import { Task, Size, Depth, LoadBalancer, Tracker, Trackers, TaskMetadata } from "../types/TaskTypes.sol";
 import { TaskExecutor } from "./Executor.sol";
 import { TaskFactory } from "./Factory.sol";
 import { TaskBits } from "../libraries/TaskBits.sol";
-
-import { SafeTransferLib } from "@solady/utils/SafeTransferLib.sol";
 
 /// @title TaskScheduler
 /// @notice Handles task scheduling and queue management
