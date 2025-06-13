@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity 0.8.28;
 
+import { VmSafe } from "forge-std/Vm.sol";
+import { UpgradeUtils } from "../../../script/upgradeability/UpgradeUtils.sol";
+
+import { DummyGasRelayUpgradeable } from "./DummyGasRelayUpgradeable.sol";
 import { DummyGasRelay } from "./DummyGasRelay.sol";
 import { BaseTest } from "test/base/BaseTest.t.sol";
 import { ITaskManager } from "../../../src/task-manager/interfaces/ITaskManager.sol";
@@ -9,8 +13,19 @@ import { GasRelayHelper } from "../../../src/common/relay/core/GasRelayHelper.so
 import { GasRelayErrors } from "../../../src/common/relay/core/GasRelayErrors.sol";
 import { NonPayableContract, GasRelayAttack } from "./TestContracts.sol";
 
-contract DummyGasRelayTest is BaseTest {
+import {
+    TransparentUpgradeableProxy,
+    ITransparentUpgradeableProxy
+} from "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
+import { ProxyAdmin } from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
+
+contract DummyGasRelayUpgradeableTest is BaseTest {
+    using UpgradeUtils for VmSafe;
+
+    DummyGasRelayUpgradeable public dummyGasRelayImplementation;
+    TransparentUpgradeableProxy public proxy;
     DummyGasRelay public dummyGasRelay;
+
     address public owner;
     address public sessionKey;
     
@@ -25,10 +40,6 @@ contract DummyGasRelayTest is BaseTest {
         owner = makeAddr("owner");
         sessionKey = makeAddr("sessionKey");
         
-        // Get the real TaskManager and shMonad from BaseTest
-        address taskManager = address(addressHub.taskManager());
-        address shMonadAddr = address(shMonad);
-        
         // Default escrow duration (previously hardcoded to 16)
         uint48 escrowDuration = 16;
         
@@ -36,20 +47,38 @@ contract DummyGasRelayTest is BaseTest {
         uint256 targetBalanceMultiplier = 2;
         
         // Deploy DummyGasRelay with real contracts
-        dummyGasRelay = new DummyGasRelay(
+        dummyGasRelayImplementation = new DummyGasRelayUpgradeable();
+
+        bytes memory initCalldata = abi.encodeCall(DummyGasRelayUpgradeable.initialize, (
             MAX_EXPECTED_GAS_USAGE_PER_TX,
             escrowDuration,
-            targetBalanceMultiplier,
-            50_000,
-            50_000
+            targetBalanceMultiplier)
         );
+
+        // Deploy proxy contract
+        (proxy, ) = VmSafe(vm).deployProxy(address(dummyGasRelayImplementation), deployer, initCalldata);
+
+        /* Equivalent to:
+            proxy = new TransparentUpgradeableProxy(
+                address(dummyGasRelayImplementation),
+                deployer,
+                abi.encodeCall(DummyGasRelayUpgradeable.initialize, (
+                    MAX_EXPECTED_GAS_USAGE_PER_TX,
+                    escrowDuration,
+                    targetBalanceMultiplier)
+                )
+            );
+        */
+
+        // Set the dummy gas relay to point at the proxy
+        dummyGasRelay = DummyGasRelay(payable(address(proxy)));
         
         // Give ETH to owner for testing
         vm.deal(owner, 10 ether);
         vm.deal(sessionKey, 1 ether);
     }
     
-    function testStandardMethod() public {
+    function testStandardMethodUpgradeable() public {
         vm.prank(owner);
         
         vm.expectEmit(true, true, true, true);
@@ -58,7 +87,7 @@ contract DummyGasRelayTest is BaseTest {
         dummyGasRelay.standardMethod(123);
     }
     
-    function testLockedMethod() public {
+    function testLockedMethodUpgradeable() public {
         vm.prank(owner);
         
         vm.expectEmit(true, true, true, true);
@@ -67,7 +96,7 @@ contract DummyGasRelayTest is BaseTest {
         dummyGasRelay.lockedMethod(456);
     }
     
-    function testCreateOrUpdateMethod() public {
+    function testCreateOrUpdateMethodUpgradeable() public {
         vm.prank(owner);
         
         vm.expectEmit(true, true, true, true);
@@ -80,7 +109,7 @@ contract DummyGasRelayTest is BaseTest {
         );
     }
     
-    function testSessionKeyFunding() public {
+    function testSessionKeyFundingUpgradeable() public {
         // Create a non-payable contract for testing
         NonPayableContract nonPayableContract = new NonPayableContract();
         
@@ -98,7 +127,7 @@ contract DummyGasRelayTest is BaseTest {
         dummyGasRelay.replenishGasBalance{value: fundingAmount}();
     }
     
-    function testReentrancyProtection() public {
+    function testReentrancyProtectionUpgradeable() public {
         // Create an attack contract that will try to reenter
         GasRelayAttack reentrancyAttack = new GasRelayAttack(payable(address(dummyGasRelay)));
         
@@ -116,7 +145,7 @@ contract DummyGasRelayTest is BaseTest {
         assertEq(address(reentrancyAttack).balance, 1 ether);
     }
     
-    function testGasAbstractedModifier() public {
+    function testGasAbstractedModifierUpgradeable() public {
         // Setup a session key for the owner
         vm.prank(owner);
         dummyGasRelay.updateSessionKey(sessionKey, block.number + 1000);
@@ -142,7 +171,7 @@ contract DummyGasRelayTest is BaseTest {
         dummyGasRelay.gasAbstractedMethod(789);
     }
     
-    function testSessionKeySecurityEdgeCases() public {
+    function testSessionKeySecurityEdgeCasesUpgradeable() public {
         // Test 1: Owner cannot set itself as its own session key
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(GasRelayErrors.SessionKeyCantOwnSelf.selector));
@@ -175,7 +204,7 @@ contract DummyGasRelayTest is BaseTest {
         dummyGasRelay.gasAbstractedMethod(123);
     }
     
-    function testGasAbstractedReimbursementMatrix() public {
+    function testGasAbstractedReimbursementMatrixUpgradeable() public {
         // This test verifies the gas reimbursement logic using real contracts from BaseTest
         // Instead of controlling mock responses, we'll check actual state changes
         
@@ -184,13 +213,19 @@ contract DummyGasRelayTest is BaseTest {
         address shMonadAddr = address(shMonad);
         
         // Deploy a new relay with real contracts for testing reimbursement
-        DummyGasRelay testRelay = new DummyGasRelay(
-            MAX_EXPECTED_GAS_USAGE_PER_TX,
-            16, // escrowDuration
-            2,   // targetBalanceMultiplier
-            50_000,
-            50_000
+        vm.prank(deployer);
+        TransparentUpgradeableProxy newProxy = new TransparentUpgradeableProxy(
+            address(dummyGasRelayImplementation),
+            deployer,
+            abi.encodeCall(DummyGasRelayUpgradeable.initialize, (
+                MAX_EXPECTED_GAS_USAGE_PER_TX,
+                16,
+                2)
+            )
         );
+
+        // Set the dummy gas relay to point at the proxy
+        DummyGasRelay testRelay = DummyGasRelay(payable(address(newProxy)));
         
         // Set up owner and give them MON for operations
         vm.deal(owner, 10 ether);
@@ -237,7 +272,7 @@ contract DummyGasRelayTest is BaseTest {
         testRelay.gasAbstractedMethod(456);
     }
     
-    function testGetNextAffordableBlockWithIterationLimit() public view {
+    function testGetNextAffordableBlockWithIterationLimitUpgradeable() public view {
         // This test verifies the search loop in _getNextAffordableBlock correctly
         // handles max gas limits and returns appropriate values based on payment amounts
 
@@ -291,28 +326,40 @@ contract DummyGasRelayTest is BaseTest {
         assertEq(gasLimit, 0, "Should return 0 when search gas exhausted");
     }
     
-    function testTargetBalanceCalculation() public {
+    function testTargetBalanceCalculationUpgradeable() public {
         // This test verifies the target balance calculation with different base fees
         // and shift multipliers
         
         // Create a relay with different targetBalanceMultiplier values for testing
-        // Use multiplier 4 (direct 4x)
-        DummyGasRelay relay4x = new DummyGasRelay(
-            MAX_EXPECTED_GAS_USAGE_PER_TX,
-            16, // escrowDuration
-            4,   // targetBalanceMultiplier (direct 4x)
-            50_000,
-            50_000
+        // Deploy a new relay with real contracts for testing reimbursement
+        vm.prank(deployer);
+        TransparentUpgradeableProxy newProxy1 = new TransparentUpgradeableProxy(
+            address(dummyGasRelayImplementation),
+            deployer,
+            abi.encodeCall(DummyGasRelayUpgradeable.initialize, (
+                MAX_EXPECTED_GAS_USAGE_PER_TX,
+                16,
+                4)
+            )
         );
-        
-        // Use multiplier 8 (direct 8x)
-        DummyGasRelay relay8x = new DummyGasRelay(
-            MAX_EXPECTED_GAS_USAGE_PER_TX,
-            16, // escrowDuration
-            8,   // targetBalanceMultiplier (direct 8x)
-            50_000,
-            50_000
+
+        // Set the dummy gas relay to point at the proxy
+        DummyGasRelay relay4x = DummyGasRelay(payable(address(newProxy1)));
+    
+        // Deploy a new relay with real contracts for testing reimbursement
+        vm.prank(deployer);
+        TransparentUpgradeableProxy newProxy2 = new TransparentUpgradeableProxy(
+            address(dummyGasRelayImplementation),
+            deployer,
+            abi.encodeCall(DummyGasRelayUpgradeable.initialize, (
+                MAX_EXPECTED_GAS_USAGE_PER_TX,
+                16,
+                8)
+            )
         );
+
+        // Set the dummy gas relay to point at the proxy
+        DummyGasRelay relay8x = DummyGasRelay(payable(address(newProxy2)));
         
         // Setup a session key for testing
         vm.prank(owner);
@@ -366,7 +413,7 @@ contract DummyGasRelayTest is BaseTest {
         assertEq(actualDeficit, expectedDeficit, "Deficit calculation should match expected");
     }
     
-    function testTransientStorageClearing() public {
+    function testTransientStorageClearingUpgradeable() public {
         // This test verifies that transient storage for the abstracted msg.sender
         // is always cleared after function execution, even on revert
         
@@ -408,22 +455,28 @@ contract DummyGasRelayTest is BaseTest {
     }
     
     // Add a real TaskManager integration test
-    function testRealTaskManagerIntegration() public {
+    function testRealTaskManagerIntegrationUpgradeable() public {
         // This test uses the real TaskManager contract from BaseTest
         // to verify that the gas abstraction works with the real contract
         
+        // Deploy a new relay with real contracts for testing reimbursement
+        vm.prank(deployer);
+        TransparentUpgradeableProxy newProxy = new TransparentUpgradeableProxy(
+            address(dummyGasRelayImplementation),
+            deployer,
+            abi.encodeCall(DummyGasRelayUpgradeable.initialize, (
+                MAX_EXPECTED_GAS_USAGE_PER_TX,
+                16,
+                8)
+            )
+        );
+
+        // Set the dummy gas relay to point at the proxy
+        DummyGasRelay realIntegrationRelay = DummyGasRelay(payable(address(newProxy)));
+        
         // Setup a session key for the owner
         vm.startPrank(owner);
-        
-        // Create a relay with the real TaskManager and shMonad from BaseTest
-        DummyGasRelay realIntegrationRelay = new DummyGasRelay(
-            MAX_EXPECTED_GAS_USAGE_PER_TX,
-            16, // escrowDuration
-            2,   // targetBalanceMultiplier
-            50_000,
-            50_000
-        );
-        
+
         // Set up a session key
         realIntegrationRelay.updateSessionKey(sessionKey, block.number + 1000);
         
@@ -445,7 +498,7 @@ contract DummyGasRelayTest is BaseTest {
     }
     
     // Add a regression test
-    function testGasAbstractedTailRuns() public {
+    function testGasAbstractedTailRunsUpgradeable() public {
         // Setup a session key for the owner
         vm.prank(owner);
         dummyGasRelay.updateSessionKey(sessionKey, block.number + 1000);
@@ -473,18 +526,24 @@ contract DummyGasRelayTest is BaseTest {
     }
     
     // Test that credits from task execution are properly captured for non-session-key callers
-    function testNonSessionKeyTaskCreditsCapture() public {
+    function testNonSessionKeyTaskCreditsCaptureUpgradeable() public {
         // This test verifies that task execution credits are properly captured
         // when calling gas abstracted functions as a regular user (not a session key)
         
-        // Create a fresh relay with real contracts for this specific test
-        DummyGasRelay creditsRelay = new DummyGasRelay(
-            MAX_EXPECTED_GAS_USAGE_PER_TX,
-            16, // escrowDuration
-            2,   // targetBalanceMultiplier
-            50_000,
-            50_000
+        // Deploy a new relay with real contracts for testing reimbursement
+        vm.prank(deployer);
+        TransparentUpgradeableProxy newProxy = new TransparentUpgradeableProxy(
+            address(dummyGasRelayImplementation),
+            deployer,
+            abi.encodeCall(DummyGasRelayUpgradeable.initialize, (
+                MAX_EXPECTED_GAS_USAGE_PER_TX,
+                16,
+                8)
+            )
         );
+
+        // Set the dummy gas relay to point at the proxy
+        DummyGasRelay creditsRelay = DummyGasRelay(payable(address(newProxy)));
         
         // Set up a new user with MON
         address regularUser = makeAddr("regularUser");

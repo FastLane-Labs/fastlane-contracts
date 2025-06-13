@@ -21,7 +21,7 @@ The **Gas Relay** module lets you delegate transaction fees to a *session key* t
 
 ```bash
 User Wallet ─┐                 ┌─────────────────────────────────┐
-             │   1. create     │  GasRelayBase (this module)      │
+             │   1. create     │  GasRelay (this module)      │
              └─▶ Session Key ─▶│   ‑ maintains key metadata       │
                                │   ‑ funds key from ShMonad       │
 Session Key ─┐                 │   ‑ exposes GasAbstracted mod.   │
@@ -78,12 +78,12 @@ npm install --save https://github.com/FastLane-Labs/fastlane-contracts
 
 To implement gas-less transactions in your dApp:
 
-### 1. Inherit from GasRelayBase
+### 1. Inherit from GasRelay
 
-Your contract must inherit from `GasRelayBase` to access the gas abstraction functionality:
+Your contract must inherit from `GasRelay` to access the gas abstraction functionality:
 
 ```solidity
-contract MyDApp is GasRelayBase {
+contract MyDApp is GasRelay {
     constructor(
         address taskManager,
         address shMonad,
@@ -91,7 +91,7 @@ contract MyDApp is GasRelayBase {
         uint48 escrowDuration,
         uint256 targetBalanceMultiplier
     ) 
-        GasRelayBase(taskManager, shMonad, maxExpectedGasUsagePerTx, escrowDuration, targetBalanceMultiplier) 
+        GasRelay(taskManager, shMonad, maxExpectedGasUsagePerTx, escrowDuration, targetBalanceMultiplier) 
     {}
     
     // Your contract code...
@@ -190,7 +190,7 @@ sequenceDiagram
 
 | Contract       | Signature                                                            | Purpose                                 |
 | -------------- | -------------------------------------------------------------------- | --------------------------------------- |
-| `GasRelayBase` | `updateSessionKey(address key, uint256 expiry)`                      | Create / modify session key             |
+| `GasRelay` | `updateSessionKey(address key, uint256 expiry)`                      | Create / modify session key             |
 |                | `replenishGasBalance()`                                              | Top‑up key, bond surplus                |
 |                | `deactivateSessionKey(address key)`                                  | Early key removal                       |
 |                | `getCurrentSessionKeyData(address owner)`                            | View helper (balances, expiry, targets) |

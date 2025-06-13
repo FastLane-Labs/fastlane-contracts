@@ -25,8 +25,8 @@ contract GasRelayAttack is SimpleReentrancyAttack {
     uint256 public callCount;
     string[] public callHistory;
 
-    constructor(address _target) {
-        target = DummyGasRelay(_target);
+    constructor(address payable _target) {
+        target = DummyGasRelay(payable(_target));
     }
 
     // Function to reset state for a new test
