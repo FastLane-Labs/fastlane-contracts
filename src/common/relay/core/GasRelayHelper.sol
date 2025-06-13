@@ -1,85 +1,14 @@
 //SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import { ITaskManager } from "../../task-manager/interfaces/ITaskManager.sol";
-import { IShMonad } from "../../shmonad/interfaces/IShMonad.sol";
-import { SessionKey, SessionKeyData, GasAbstractionTracker } from "./GasRelayTypes.sol";
-import { GasRelayErrors } from "./GasRelayErrors.sol";
-
-/// @title ITaskManagerImmutables
-/// @notice Interface for accessing TaskManager immutable variables
-interface ITaskManagerImmutables {
-    function POLICY_ID() external view returns (uint64);
-}
+import { IShMonad } from "../../../shmonad/interfaces/IShMonad.sol";
+import { SessionKey, CallerType } from "../types/GasRelayTypes.sol";
+import { GasRelayConstants } from "./GasRelayConstants.sol";
 
 /// @title GasRelayHelper
 /// @notice Helper functions for session key and ShMONAD interactions
 /// @dev Contains utility functions for the gas relay system
-contract GasRelayHelper is GasRelayErrors {
-    /// @notice Address of the task manager contract
-    address public immutable TASK_MANAGER;
-
-    /// @notice Policy ID for the task manager
-    uint64 public immutable TASK_MANAGER_POLICY_ID;
-
-    /// @notice Address of the ShMonad protocol
-    address public immutable SHMONAD;
-
-    /// @notice Policy ID for this contract
-    uint64 public immutable POLICY_ID;
-
-    /// @notice Policy wrapper ERC20 token address
-    address public immutable POLICY_WRAPPER;
-
-    /// @notice Maximum expected gas usage per transaction
-    uint256 internal immutable _MAX_EXPECTED_GAS_USAGE_PER_TX;
-
-    /// @notice Multiplier for target balance (1=1x, 2=2x, 4=4x)
-    uint256 private immutable _targetBalanceMultiplier;
-
-    /// @notice Namespace for session key storage
-    bytes32 private immutable SESSION_KEY_NAMESPACE;
-
-    /// @notice Namespace for key owner storage
-    bytes32 private immutable KEY_OWNER_NAMESPACE;
-
-    /// @notice Namespace for underlying caller transient storage
-    bytes32 private immutable UNDERLYING_CALLER_NAMESPACE;
-
-    /// @notice Minimum gas required for task execution
-    uint256 internal constant _MIN_TASK_EXECUTION_GAS = 110_000;
-
-    /// @notice Buffer for task manager execution
-    uint256 internal constant _TASK_MANAGER_EXECUTION_GAS_BUFFER = 31_000;
-
-    /// @notice Minimum gas required for gas abstraction
-    uint256 internal constant _GAS_ABSTRACTION_MIN_REMAINDER_GAS = 65_000;
-
-    /// @notice Buffer for minimum remainder gas
-    uint256 internal constant _MIN_REMAINDER_GAS_BUFFER = 31_000;
-
-    /// @notice Base gas usage for a transaction
-    uint256 internal constant _BASE_TX_GAS_USAGE = 21_000;
-
-    /// @notice Maximum base fee increase factor (112.5%)
-    uint256 internal constant _BASE_FEE_MAX_INCREASE = 1125;
-
-    /// @notice Denominator for base fee calculations
-    uint256 internal constant _BASE_FEE_DENOMINATOR = 1000;
-
-    /// @notice Transient storage bit for tracking usage lock
-    bytes32 private constant _IN_USE_BIT = 0x0000000000000000000000020000000000000000000000000000000000000000;
-
-    /// @notice Transient storage bit for modifying usage lock
-    bytes32 private constant _NOT_IN_USE_BITMASK = 0xfffffffffffffffffffffffdffffffffffffffffffffffffffffffffffffffff;
-
-    /// @notice Transient storage bit for identifying session keys
-    bytes32 private constant _IS_SESSION_KEY_BIT = 0x0000000000000000000000040000000000000000000000000000000000000000;
-
-    /// @notice Combined bits for session key in use
-    bytes32 private constant _IN_USE_AS_SESSION_KEY_BITS =
-        0x0000000000000000000000060000000000000000000000000000000000000000;
-
+abstract contract GasRelayHelper is GasRelayConstants {
     /// @notice Emitted when a session key is removed
     /// @param sessionKeyAddress Address of the removed session key
     /// @param owner Address of the owner
@@ -92,68 +21,40 @@ contract GasRelayHelper is GasRelayErrors {
         uint256 remainingBalance
     );
 
-    /// @notice Constructor for GasRelayHelper
-    /// @param taskManager Address of the task manager contract
-    /// @param shMonad Address of the ShMonad protocol
-    /// @param maxExpectedGasUsagePerTx Maximum expected gas per transaction
-    /// @param escrowDuration Duration of escrow in blocks
-    /// @param targetBalanceMultiplier Multiplier for target balance calculation (1=1x, 2=2x, etc.)
-    constructor(
-        address taskManager,
-        address shMonad,
-        uint256 maxExpectedGasUsagePerTx,
-        uint48 escrowDuration,
-        uint256 targetBalanceMultiplier
-    ) {
-        TASK_MANAGER = taskManager;
-        SHMONAD = shMonad;
+    /// @notice Get the abstracted msg.sender and contextual data
+    /// @dev Returns the original owner address when called by a session key
+    /// @return Address of the abstracted msg.sender
+    /// @return expiration Block number that session key expires
+    /// @return isSessionKey bool indicating that the abstracted msg.sender is a session key
+    /// @return isTask bool indicating that the abstracted msg.sender is a task
+    function _abstractedMsgSenderWithContext()
+        internal
+        view
+        virtual
+        returns (address, uint256, bool isSessionKey, bool isTask)
+    {
+        // NOTE: We use transient storage so that apps can access this value inside of a try/catch,
+        // which is a useful pattern if they still want to handle the gas reimbursement of a gas abstracted
+        // transaction in scenarios in which the users' call would revert.
 
-        // Using the reinstated interface here
-        TASK_MANAGER_POLICY_ID = ITaskManagerImmutables(taskManager).POLICY_ID();
+        (address _underlyingMsgSender, bool _isCallerSessionKey, bool _isCallerTask, bool _isInUse) =
+            _loadUnderlyingMsgSenderData();
 
-        // Create ShMONAD commitment policy for this app
-        (uint64 policyIDLocal, address policyERC20WrapperLocal) = IShMonad(shMonad).createPolicy(escrowDuration);
-        POLICY_ID = policyIDLocal;
-        POLICY_WRAPPER = policyERC20WrapperLocal;
+        if (!_isInUse) {
+            return (msg.sender, 0, false, false);
+        }
 
-        _MAX_EXPECTED_GAS_USAGE_PER_TX = maxExpectedGasUsagePerTx;
-        _targetBalanceMultiplier = targetBalanceMultiplier;
+        if (!_isCallerSessionKey && !_isCallerTask) {
+            return (msg.sender, 0, false, false);
+        }
 
-        // Create storage namespaces
-        SESSION_KEY_NAMESPACE = keccak256(
-            abi.encode(
-                "ShMonad GasRelayHelper 1.0",
-                "Session Key Namespace",
-                taskManager,
-                shMonad,
-                policyIDLocal,
-                address(this),
-                block.chainid
-            )
-        );
-        KEY_OWNER_NAMESPACE = keccak256(
-            abi.encode(
-                "ShMonad GasRelayHelper 1.0",
-                "Key Owner Namespace",
-                taskManager,
-                shMonad,
-                policyIDLocal,
-                address(this),
-                block.chainid
-            )
-        );
-
-        UNDERLYING_CALLER_NAMESPACE = keccak256(
-            abi.encode(
-                "ShMonad GasRelayHelper 1.0",
-                "Underlying Caller Transient Namespace",
-                taskManager,
-                shMonad,
-                policyIDLocal,
-                address(this),
-                block.chainid
-            )
-        );
+        if (msg.sender == address(this) || msg.sender == _underlyingMsgSender) {
+            (address _owner, uint256 _expiration) = _loadAbstractedMsgSenderWithExpiration(_underlyingMsgSender);
+            if (_owner != address(0) && _expiration > block.number) {
+                return (_owner, _expiration, _isCallerSessionKey, _isCallerTask);
+            }
+        }
+        return (msg.sender, 0, false, false);
     }
 
     /// @notice Calculate the deficit between current and target balance for a session key
@@ -177,14 +78,15 @@ contract GasRelayHelper is GasRelayErrors {
         uint256 _gasRate = tx.gasprice > block.basefee ? tx.gasprice : block.basefee;
         _gasRate = _gasRate * _BASE_FEE_MAX_INCREASE / _BASE_FEE_DENOMINATOR;
         // Use direct multiplication instead of bit shifting
-        targetBalance = (_MAX_EXPECTED_GAS_USAGE_PER_TX * _gasRate) * _targetBalanceMultiplier;
+        (uint256 _maxExpectedGasUsage, uint256 _targetBalanceMultipler) = _GAS_USAGE_AND_MULTIPLIER();
+        targetBalance = (_maxExpectedGasUsage * _gasRate) * _targetBalanceMultipler;
     }
 
     /// @notice Check if the contract is currently in use (reentrancy check)
     /// @return inUse True if the contract is in use
     function _inUse() internal view returns (bool inUse) {
         // Check if the transient storage has the IN_USE_BIT set
-        bytes32 _underlyingCallerTransientSlot = UNDERLYING_CALLER_NAMESPACE;
+        bytes32 _underlyingCallerTransientSlot = _UNDERLYING_CALLER_NAMESPACE();
         bytes32 _packedUnderlyingCaller;
         assembly {
             _packedUnderlyingCaller := tload(_underlyingCallerTransientSlot)
@@ -202,7 +104,7 @@ contract GasRelayHelper is GasRelayErrors {
 
     /// @notice Lock the contract against reentrancy
     function _lock() internal {
-        bytes32 _underlyingCallerTransientSlot = UNDERLYING_CALLER_NAMESPACE;
+        bytes32 _underlyingCallerTransientSlot = _UNDERLYING_CALLER_NAMESPACE();
         assembly {
             tstore(_underlyingCallerTransientSlot, _IN_USE_BIT)
         }
@@ -214,7 +116,7 @@ contract GasRelayHelper is GasRelayErrors {
     /// later
     // and you either dont need reentrancy protection or you are using another mechanism that protects from reentrancy.
     function _unlock(bool preserveUnderlyingCaller) internal {
-        bytes32 _underlyingCallerTransientSlot = UNDERLYING_CALLER_NAMESPACE;
+        bytes32 _underlyingCallerTransientSlot = _UNDERLYING_CALLER_NAMESPACE();
         if (!preserveUnderlyingCaller) {
             assembly {
                 tstore(
@@ -231,7 +133,7 @@ contract GasRelayHelper is GasRelayErrors {
 
     /// @notice Load abstracted msg sender data from transient storage
     /// @param underlyingMsgSender Address of the underlying msg sender
-    /// @return abstractedMsgSender Address of the session key's owner
+    /// @return abstractedMsgSender Address of the session key or task's owner
     /// @return valid Bool indicating if the session key is valid
     function _loadAbstractedMsgSenderData(address underlyingMsgSender)
         internal
@@ -246,31 +148,63 @@ contract GasRelayHelper is GasRelayErrors {
         valid = abstractedMsgSender != address(0) && uint256(_sessionKey.expiration) > block.number;
     }
 
+    /// @notice Load abstracted msg sender and expiration from transient storage
+    /// @param underlyingMsgSender Address of the underlying msg sender
+    /// @return abstractedMsgSender Address of the session key or task's owner
+    /// @return expiration Block number that session key expires
+    function _loadAbstractedMsgSenderWithExpiration(address underlyingMsgSender)
+        internal
+        view
+        returns (address abstractedMsgSender, uint256 expiration)
+    {
+        if (underlyingMsgSender == address(0) || underlyingMsgSender == address(this)) {
+            return (address(0), uint256(0));
+        }
+        SessionKey memory _sessionKey = _loadSessionKey(underlyingMsgSender);
+        abstractedMsgSender = _sessionKey.owner;
+        expiration = uint256(_sessionKey.expiration);
+    }
+
     /// @notice Store underlying msg sender in transient storage
-    function _storeUnderlyingMsgSender(bool isSessionKey) internal {
+    function _storeUnderlyingMsgSender(CallerType callerType) internal {
+        // NOTE: Apps wishing to update the underlying msg sender multiple times in the same
+        // tx should use the _unlock(false) command first.
+        if (msg.sender == address(this)) return;
+
         // NOTE: We do not let smart contracts use session keys. EIP-7702-enabled wallets
         // should already benefit from "session key" usage and will get treated as a
-        // default owner, which results in the same UX.
-        if (msg.sender == address(this) || address(msg.sender).code.length != 0) return;
+        // default owner, which results in the same UX. The exception is if it's a task.
+        if (address(msg.sender).code.length != 0 && callerType != CallerType.Task) return;
 
-        bytes32 _underlyingCallerTransientSlot = UNDERLYING_CALLER_NAMESPACE;
-        address _underlyingCaller = address(msg.sender);
-        bytes32 _packedUnderlyingCaller = isSessionKey ? _IN_USE_AS_SESSION_KEY_BITS : _IN_USE_BIT;
+        bytes32 _packedUnderlyingCaller;
+
+        if (callerType == CallerType.Owner) {
+            // NOTE: We don't store the caller - we just treat this as a lock
+            _packedUnderlyingCaller = _IN_USE_BIT;
+        } else if (callerType == CallerType.SessionKey) {
+            _packedUnderlyingCaller = bytes32(uint256(uint160(address(msg.sender)))) | _IN_USE_AS_SESSION_KEY_BITS;
+        } else if (callerType == CallerType.Task) {
+            _packedUnderlyingCaller = bytes32(uint256(uint160(address(msg.sender)))) | _IN_USE_AS_TASK_BITS;
+        } else {
+            revert UnknownMsgSenderType();
+        }
+        bytes32 _underlyingCallerTransientSlot = _UNDERLYING_CALLER_NAMESPACE();
         assembly {
-            tstore(_underlyingCallerTransientSlot, or(_packedUnderlyingCaller, _underlyingCaller))
+            tstore(_underlyingCallerTransientSlot, _packedUnderlyingCaller)
         }
     }
 
     /// @notice Load underlying msg sender data from transient storage
     /// @return underlyingMsgSender Address of the underlying msg sender (embedded wallet / bundler)
     /// @return isSessionKey Whether the caller is using a session key
+    /// @return isTask Whether the caller is a task
     /// @return inUse Whether the contract is in use
     function _loadUnderlyingMsgSenderData()
         internal
         view
-        returns (address underlyingMsgSender, bool isSessionKey, bool inUse)
+        returns (address underlyingMsgSender, bool isSessionKey, bool isTask, bool inUse)
     {
-        bytes32 _underlyingCallerTransientSlot = UNDERLYING_CALLER_NAMESPACE;
+        bytes32 _underlyingCallerTransientSlot = _UNDERLYING_CALLER_NAMESPACE();
         bytes32 _packedUnderlyingCaller;
         assembly {
             _packedUnderlyingCaller := tload(_underlyingCallerTransientSlot)
@@ -278,14 +212,16 @@ contract GasRelayHelper is GasRelayErrors {
                 and(_packedUnderlyingCaller, 0x000000000000000000000000ffffffffffffffffffffffffffffffffffffffff)
         }
         isSessionKey = _packedUnderlyingCaller & _IS_SESSION_KEY_BIT != 0;
+        isTask = _packedUnderlyingCaller & _IS_TASK_BIT != 0;
         inUse = _packedUnderlyingCaller & _IN_USE_BIT != 0;
     }
 
     /// @notice Update a session key's data
     /// @param sessionKeyAddress Address of the session key
+    /// @param isTask Bool indicating if this is a task
     /// @param owner Address of the owner
     /// @param expiration Block number when the session key expires
-    function _updateSessionKey(address sessionKeyAddress, address owner, uint256 expiration) internal {
+    function _updateSessionKey(address sessionKeyAddress, bool isTask, address owner, uint256 expiration) internal {
         if (sessionKeyAddress == owner) {
             revert SessionKeyCantOwnSelf();
         }
@@ -293,27 +229,37 @@ contract GasRelayHelper is GasRelayErrors {
             revert SessionKeyExpirationInvalid(expiration);
         }
 
-        address _existingSessionKeyAddress;
-        bytes32 _keyOwnerStorageSlot = keccak256(abi.encodePacked(owner, KEY_OWNER_NAMESPACE));
-        assembly {
-            _existingSessionKeyAddress := sload(_keyOwnerStorageSlot)
-        }
-
-        if (sessionKeyAddress != _existingSessionKeyAddress) {
-            if (_existingSessionKeyAddress != address(0)) {
-                _deactivateSessionKey(_existingSessionKeyAddress);
-            }
+        if (!isTask) {
+            address _existingSessionKeyAddress;
+            bytes32 _keyOwnerStorageSlot = keccak256(abi.encodePacked(owner, _KEY_OWNER_NAMESPACE()));
             assembly {
-                sstore(_keyOwnerStorageSlot, sessionKeyAddress)
+                _existingSessionKeyAddress := sload(_keyOwnerStorageSlot)
+            }
+
+            if (sessionKeyAddress != _existingSessionKeyAddress) {
+                if (_existingSessionKeyAddress != address(0)) {
+                    _deactivateSessionKey(_existingSessionKeyAddress);
+                }
+                assembly {
+                    sstore(_keyOwnerStorageSlot, sessionKeyAddress)
+                }
             }
         }
 
         if (sessionKeyAddress != address(0)) {
-            bytes32 _sessionKeyStorageSlot = keccak256(abi.encodePacked(sessionKeyAddress, SESSION_KEY_NAMESPACE));
-            assembly {
-                // Pack the owner and expiration, clear the expiredNotified flag
-                let _packedSessionKey := or(owner, shl(192, expiration))
-                sstore(_sessionKeyStorageSlot, _packedSessionKey)
+            bytes32 _sessionKeyStorageSlot = keccak256(abi.encodePacked(sessionKeyAddress, _SESSION_KEY_NAMESPACE()));
+            if (isTask) {
+                assembly {
+                    // Pack the owner and expiration, clear the expiredNotified flag
+                    let _packedTaskSessionKey := or(or(owner, shl(192, expiration)), _IS_TASK_BIT)
+                    sstore(_sessionKeyStorageSlot, _packedTaskSessionKey)
+                }
+            } else {
+                assembly {
+                    // Pack the owner and expiration, clear the expiredNotified flag
+                    let _packedSessionKey := or(owner, shl(192, expiration))
+                    sstore(_sessionKeyStorageSlot, _packedSessionKey)
+                }
             }
         }
     }
@@ -321,7 +267,7 @@ contract GasRelayHelper is GasRelayErrors {
     /// @notice Deactivate a session key
     /// @param sessionKeyAddress Address of the session key to deactivate
     function _deactivateSessionKey(address sessionKeyAddress) internal {
-        bytes32 _sessionKeyStorageSlot = keccak256(abi.encodePacked(sessionKeyAddress, SESSION_KEY_NAMESPACE));
+        bytes32 _sessionKeyStorageSlot = keccak256(abi.encodePacked(sessionKeyAddress, _SESSION_KEY_NAMESPACE()));
         uint256 _expiration;
         bytes32 _packedSessionKey;
         assembly {
@@ -346,7 +292,7 @@ contract GasRelayHelper is GasRelayErrors {
     /// @param ownerAddress Address of the owner
     /// @return sessionKeyAddress Address of the session key
     function _getSessionKeyAddress(address ownerAddress) internal view returns (address sessionKeyAddress) {
-        bytes32 _keyOwnerStorageSlot = keccak256(abi.encodePacked(ownerAddress, KEY_OWNER_NAMESPACE));
+        bytes32 _keyOwnerStorageSlot = keccak256(abi.encodePacked(ownerAddress, _KEY_OWNER_NAMESPACE()));
         assembly {
             sessionKeyAddress := sload(_keyOwnerStorageSlot)
         }
@@ -356,17 +302,20 @@ contract GasRelayHelper is GasRelayErrors {
     /// @param sessionKeyAddress Address of the session key
     /// @return sessionKey Session key data
     function _loadSessionKey(address sessionKeyAddress) internal view returns (SessionKey memory sessionKey) {
-        bytes32 _sessionKeyStorageSlot = keccak256(abi.encodePacked(sessionKeyAddress, SESSION_KEY_NAMESPACE));
+        bytes32 _sessionKeyStorageSlot = keccak256(abi.encodePacked(sessionKeyAddress, _SESSION_KEY_NAMESPACE()));
         address _owner;
         uint256 _expiration;
+        bool _isTask;
         assembly {
             let _packedSessionKey := sload(_sessionKeyStorageSlot)
             _owner := and(_packedSessionKey, 0x000000000000000000000000ffffffffffffffffffffffffffffffffffffffff)
             _expiration :=
                 and(shr(192, _packedSessionKey), 0x000000000000000000000000000000000000000000000000ffffffffffffffff)
+            _isTask := gt(and(_packedSessionKey, _IS_TASK_BIT), 0)
         }
         sessionKey.owner = _owner;
         sessionKey.expiration = uint64(_expiration);
+        sessionKey.isTask = _isTask;
     }
 
     /// @notice Load session key from owner address
@@ -377,99 +326,57 @@ contract GasRelayHelper is GasRelayErrors {
         if (_sessionKeyAddress != address(0)) {
             sessionKey = _loadSessionKey(_sessionKeyAddress);
         }
+        // NOTE: To save gas costs, task-based session keys cannot currently be loaded by owner.
+        // If you need this functionality, please let us know.
     }
 
     /// @notice Credit shares to owner and bond to policy
     /// @param owner Address of the owner
     /// @param shares Number of shares to credit
     function _creditToOwnerAndBond(address owner, uint256 shares) internal {
-        IShMonad(SHMONAD).bond(POLICY_ID, owner, shares);
+        IShMonad(SHMONAD).bond(POLICY_ID(), owner, shares);
     }
 
     /// @notice Take shares from owner's bonded balance
     /// @param owner Address of the owner
     /// @param shares Number of shares to take
     function _takeFromOwnerBondedShares(address owner, uint256 shares) internal {
-        IShMonad(SHMONAD).agentTransferToUnbonded(POLICY_ID, owner, address(this), shares, 0, false);
+        IShMonad(SHMONAD).agentTransferToUnbonded(POLICY_ID(), owner, address(this), shares, 0, false);
     }
 
     /// @notice Take amount from owner's bonded balance
     /// @param owner Address of the owner
     /// @param amount Amount to take
     function _takeFromOwnerBondedAmount(address owner, uint256 amount) internal {
-        IShMonad(SHMONAD).agentTransferToUnbonded(POLICY_ID, owner, address(this), amount, 0, true);
+        IShMonad(SHMONAD).agentTransferToUnbonded(POLICY_ID(), owner, address(this), amount, 0, true);
     }
 
     /// @notice Take amount in underlying tokens from owner's bonded balance
     /// @param owner Address of the owner
     /// @param amount Amount to take
     function _takeFromOwnerBondedAmountInUnderlying(address owner, uint256 amount) internal {
-        IShMonad(SHMONAD).agentWithdrawFromBonded(POLICY_ID, owner, address(this), amount, 0, true);
-    }
-
-    /// @notice Bond shares to task manager
-    /// @param shares Number of shares to bond
-    function _bondSharesToTaskManager(uint256 shares) internal {
-        IShMonad(SHMONAD).bond(TASK_MANAGER_POLICY_ID, address(this), shares);
-    }
-
-    /// @notice Bond amount to task manager
-    /// @param amount Amount to bond
-    function _bondAmountToTaskManager(uint256 amount) internal {
-        IShMonad(SHMONAD).depositAndBond{ value: amount }(TASK_MANAGER_POLICY_ID, address(this), type(uint256).max);
-    }
-
-    /// @notice Begin unbonding from task manager
-    /// @param shares Number of shares to unbond
-    function _beginUnbondFromTaskManager(uint256 shares) internal {
-        IShMonad(SHMONAD).unbond(TASK_MANAGER_POLICY_ID, shares, 0);
-    }
-
-    /// @notice Get block when unbonding from task manager completes
-    /// @return blockNumber Block number when unbonding completes
-    function _taskManagerUnbondingBlock() internal view returns (uint256 blockNumber) {
-        blockNumber = IShMonad(SHMONAD).unbondingCompleteBlock(TASK_MANAGER_POLICY_ID, address(this));
-    }
-
-    /// @notice Complete unbonding from task manager
-    /// @param shares Number of shares to claim
-    function _completeUnbondFromTaskManager(uint256 shares) internal {
-        IShMonad(SHMONAD).claim(TASK_MANAGER_POLICY_ID, shares);
-    }
-
-    /// @notice Get shares bonded to task manager for an owner
-    /// @param owner Address of the owner
-    /// @return shares Number of shares bonded
-    function _sharesBondedToTaskManager(address owner) internal view returns (uint256 shares) {
-        shares = IShMonad(SHMONAD).balanceOfBonded(TASK_MANAGER_POLICY_ID, owner);
-    }
-
-    /// @notice Get shares unbonding from task manager for an owner
-    /// @param owner Address of the owner
-    /// @return shares Number of shares unbonding
-    function _sharesUnbondingFromTaskManager(address owner) internal view returns (uint256 shares) {
-        shares = IShMonad(SHMONAD).balanceOfUnbonding(TASK_MANAGER_POLICY_ID, owner);
+        IShMonad(SHMONAD).agentWithdrawFromBonded(POLICY_ID(), owner, address(this), amount, 0, true);
     }
 
     /// @notice Get shares bonded to this contract for an owner
     /// @param owner Address of the owner
     /// @return shares Number of shares bonded
     function _sharesBondedToThis(address owner) internal view returns (uint256 shares) {
-        shares = IShMonad(SHMONAD).balanceOfBonded(POLICY_ID, owner);
+        shares = IShMonad(SHMONAD).balanceOfBonded(POLICY_ID(), owner);
     }
 
     /// @notice Get amount bonded to this contract for an owner
     /// @param owner Address of the owner
     /// @return amount Amount bonded
     function _amountBondedToThis(address owner) internal view returns (uint256 amount) {
-        amount = _convertWithdrawnShMonToMon(IShMonad(SHMONAD).balanceOfBonded(POLICY_ID, owner));
+        amount = _convertWithdrawnShMonToMon(IShMonad(SHMONAD).balanceOfBonded(POLICY_ID(), owner));
     }
 
     /// @notice Get shares unbonding from this contract for an owner
     /// @param owner Address of the owner
     /// @return shares Number of shares unbonding
     function _sharesUnbondingFromThis(address owner) internal view returns (uint256 shares) {
-        shares = IShMonad(SHMONAD).balanceOfUnbonding(POLICY_ID, owner);
+        shares = IShMonad(SHMONAD).balanceOfUnbonding(POLICY_ID(), owner);
     }
 
     /// @notice Boost yield with shares
@@ -520,14 +427,6 @@ contract GasRelayHelper is GasRelayErrors {
     /// @param bondRecipient Address of the bond recipient
     /// @param amount Amount to deposit and bond
     function _depositMonAndBondForRecipient(address bondRecipient, uint256 amount) internal {
-        IShMonad(SHMONAD).depositAndBond{ value: amount }(POLICY_ID, bondRecipient, type(uint256).max);
-    }
-
-    /// @notice Estimate cost for task execution
-    /// @param targetBlock Target block for execution
-    /// @param maxTaskGas Maximum gas for task execution
-    /// @return cost Estimated cost
-    function _estimateTaskCost(uint256 targetBlock, uint256 maxTaskGas) internal view returns (uint256 cost) {
-        cost = ITaskManager(TASK_MANAGER).estimateCost(uint64(targetBlock), maxTaskGas);
+        IShMonad(SHMONAD).depositAndBond{ value: amount }(POLICY_ID(), bondRecipient, type(uint256).max);
     }
 }

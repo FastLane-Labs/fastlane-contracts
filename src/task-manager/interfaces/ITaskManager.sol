@@ -139,4 +139,8 @@ interface ITaskManager {
         external
         view
         returns (address environment);
+
+    /// @notice Get the address of the currently-executing task
+    /// @return currentTask The address of the currently-executing task
+    function getCurrentTask() external view returns (address currentTask);
 }

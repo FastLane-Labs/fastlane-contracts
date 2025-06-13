@@ -100,8 +100,7 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
         return (true, executionCost, taskId);
     }
 
-    /// @notice Schedule a task using either native MON or unbonded shMONAD
-    /// @dev If msg.value > 0, uses native MON, otherwise uses unbonded shMONAD
+    /// @notice Schedule a task using native MON
     function scheduleTask(
         address implementation,
         uint256 taskGasLimit,
@@ -246,6 +245,15 @@ contract TaskManagerEntrypoint is TaskScheduler, ITaskManager, OwnableUpgradeabl
     }
 
     // HELPERS
+
+    /// @inheritdoc ITaskManager
+    /// @notice Get the address of the currently-executing task
+    /// @return currentTask The address of the currently-executing task
+    function getCurrentTask() external view returns (address currentTask) {
+        // Get the id from transient storage only available during execution
+        bytes32 _taskId = T_currentTaskId;
+        (currentTask,,,,) = _taskId.unpack();
+    }
 
     /// @inheritdoc ITaskManager
     /// @notice Alerts whether or not a task is cancelled

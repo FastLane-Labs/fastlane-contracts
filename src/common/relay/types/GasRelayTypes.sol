@@ -1,6 +1,15 @@
 //SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+/// @title CallerType
+/// @notice differentiates between session keys, owners, and tasks
+enum CallerType {
+    Null,
+    Owner,
+    SessionKey,
+    Task
+}
+
 /// @title SessionKey
 /// @notice Data structure for session key information
 /// @dev Stores the owner and expiration time of a session key
@@ -9,6 +18,7 @@ struct SessionKey {
     address owner;
     /// @notice Block number when this session key expires
     uint64 expiration; // block number
+    bool isTask; // Identifies that the session key is from the TaskManager
 }
 
 /// @title SessionKeyData

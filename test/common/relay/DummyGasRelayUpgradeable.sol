@@ -3,28 +3,22 @@ pragma solidity 0.8.28;
 
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import { GasRelayWithScheduling } from "../../../src/common/relay/GasRelayWithScheduling.sol";
+import { GasRelayWithSchedulingUpgradeable } from "../../../src/common/relay/GasRelayWithSchedulingUpgradeable.sol";
 
 // A simple relay contract for testing
-contract DummyGasRelay is GasRelayWithScheduling {
-    constructor(
+contract DummyGasRelayUpgradeable is GasRelayWithSchedulingUpgradeable {
+    function initialize(
         uint256 maxExpectedGasUsagePerTx,
         uint48 escrowDuration,
-        uint256 targetBalanceMultiplier,
-        uint256 maxSearchGas,
-        uint256 minExecutionGasRemaining
+        uint256 targetBalanceMultiplier
     )
-        GasRelayWithScheduling(
-            maxExpectedGasUsagePerTx,
-            escrowDuration,
-            targetBalanceMultiplier,
-            maxSearchGas,
-            minExecutionGasRemaining
-        )
-    { }
+        public
+        reinitializer(1)
+    {
+        super.__gasRelayInitialize(maxExpectedGasUsagePerTx, escrowDuration, targetBalanceMultiplier);
+    }
 
     event MethodCalled(address caller, string method, uint256 value);
-    event CallbackScheduled();
 
     // Standard function with GasAbstracted modifier
     function standardMethod(uint256 value) external GasAbstracted {
@@ -57,11 +51,6 @@ contract DummyGasRelay is GasRelayWithScheduling {
     // Helper function to get the abstracted msg sender
     function getAbstractedMsgSender() external view returns (address) {
         return _abstractedMsgSender();
-    }
-
-    // Helper function to test Math.mulDiv for overflow protection (H-3 fix)
-    function testMathMulDiv(uint256 a, uint256 b) external pure returns (uint256) {
-        return Math.mulDiv(a, b, 1);
     }
 
     // Function with GasAbstracted modifier for our tests
@@ -117,10 +106,6 @@ contract DummyGasRelay is GasRelayWithScheduling {
         public
         returns (bool success, bytes32 taskID)
     {
-        (success, taskID) = _scheduleCallback(data, gas, targetBlock, expirationBlock, setOwnerAsMsgSenderDuringTask);
-        emit CallbackScheduled();
-        return (success, taskID);
+        return _scheduleCallback(data, gas, targetBlock, expirationBlock, setOwnerAsMsgSenderDuringTask);
     }
-
-    receive() external payable override { }
 }
