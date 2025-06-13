@@ -13,7 +13,6 @@ contract DummyGasRelayUpgradeable is GasRelayWithSchedulingUpgradeable {
         uint256 targetBalanceMultiplier
     )
         public
-        reinitializer(1)
     {
         super.__gasRelayInitialize(maxExpectedGasUsagePerTx, escrowDuration, targetBalanceMultiplier);
     }

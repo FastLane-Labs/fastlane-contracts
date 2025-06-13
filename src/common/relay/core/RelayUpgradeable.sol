@@ -6,12 +6,10 @@ import { IAddressHub } from "../../IAddressHub.sol";
 
 import { GasRelayConstants } from "./GasRelayConstants.sol";
 
-import { Initializable } from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
-
 /// @title RelayUpgradeable
 /// @notice Helper functions for session key and ShMONAD interactions
 /// @dev Contains utility functions for the gas relay system
-contract RelayUpgradeable is GasRelayConstants, Initializable {
+contract RelayUpgradeable is GasRelayConstants {
     struct PolicyStorage {
         address policyWrapper;
         uint64 policyID;
@@ -77,7 +75,6 @@ contract RelayUpgradeable is GasRelayConstants, Initializable {
         uint256 targetBalanceMultiplier
     )
         internal
-        onlyInitializing
     {
         if (targetBalanceMultiplier > type(uint8).max) revert BalanceMultiplierTooHigh();
         if (maxExpectedGasUsagePerTx > type(uint24).max) revert MaxGasTooHigh();

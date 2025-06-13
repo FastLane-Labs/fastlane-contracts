@@ -32,7 +32,6 @@ contract GasRelayWithSchedulingUpgradeable is RelayTaskScheduler, RelayUpgradeab
         uint256 targetBalanceMultiplier
     )
         internal
-        onlyInitializing
     {
         super.__gasRelayInitialize(maxExpectedGasUsagePerTx, escrowDuration, targetBalanceMultiplier);
     }

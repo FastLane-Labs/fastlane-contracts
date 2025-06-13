@@ -20,7 +20,6 @@ contract GasRelayUpgradeable is GasRelayBase, RelayUpgradeable {
         uint256 targetBalanceMultiplier
     )
         internal
-        onlyInitializing
     {
         super.__gasRelayInitialize(maxExpectedGasUsagePerTx, escrowDuration, targetBalanceMultiplier);
     }
