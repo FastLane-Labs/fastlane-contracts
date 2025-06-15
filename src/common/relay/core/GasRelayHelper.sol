@@ -46,7 +46,9 @@ abstract contract GasRelayHelper is GasRelayConstants {
 
         // If owner is calling as itself, treat expiration as infinite
         if (!_isCallerSessionKey && !_isCallerTask) {
-            return (msg.sender, type(uint64).max, false, false);
+            if (msg.sender == address(this) || msg.sender == _underlyingMsgSender) {
+                return (_underlyingMsgSender, type(uint64).max, false, false);
+            }
         }
 
         if (msg.sender == address(this) || msg.sender == _underlyingMsgSender) {
