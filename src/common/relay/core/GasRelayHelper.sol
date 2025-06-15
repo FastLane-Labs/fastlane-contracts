@@ -179,8 +179,7 @@ abstract contract GasRelayHelper is GasRelayConstants {
         bytes32 _packedUnderlyingCaller;
 
         if (callerType == CallerType.Owner) {
-            // NOTE: We don't store the caller - we just treat this as a lock
-            _packedUnderlyingCaller = _IN_USE_BIT;
+            _packedUnderlyingCaller = bytes32(uint256(uint160(address(msg.sender)))) | _IN_USE_BIT;
         } else if (callerType == CallerType.SessionKey) {
             _packedUnderlyingCaller = bytes32(uint256(uint160(address(msg.sender)))) | _IN_USE_AS_SESSION_KEY_BITS;
         } else if (callerType == CallerType.Task) {
