@@ -168,7 +168,7 @@ contract GeneralReschedulingTask {
     /// @dev Must be called directly on implementation by active task
     /// @param target Address of the target contract
     /// @param data Calldata to be executed
-    function markTarget(address target, bytes calldata data) external {
+    function markTarget(address target, bytes calldata data) public {
         if (address(this) != _IMPLEMENTATION) {
             revert CantBeDelegated();
         }
@@ -187,7 +187,7 @@ contract GeneralReschedulingTask {
     /// @return target Address of the target contract
     /// @return task Address of the task contract
     /// @return calldataHash Hash of the stored calldata
-    function getTargetTaskCalldataHash() external view returns (address target, address task, bytes32 calldataHash) {
+    function getTargetTaskCalldataHash() public view returns (address target, address task, bytes32 calldataHash) {
         if (address(this) != _IMPLEMENTATION) {
             revert CantBeDelegated();
         }
@@ -217,7 +217,7 @@ contract GeneralReschedulingTask {
     /// @param maxCost Maximum cost allowed for rescheduling
     /// @param targetBlock Target block for rescheduling
     /// @param reschedule Whether to enable rescheduling
-    function setRescheduleData(address task, uint256 maxCost, uint256 targetBlock, bool reschedule) external {
+    function setRescheduleData(address task, uint256 maxCost, uint256 targetBlock, bool reschedule) public {
         if (address(this) != _IMPLEMENTATION) {
             revert CantBeDelegated();
         }
@@ -248,7 +248,7 @@ contract GeneralReschedulingTask {
         uint256 targetBlock,
         bool reschedule
     )
-        external
+        public
         returns (bool valid)
     {
         if (address(this) != _IMPLEMENTATION) {
@@ -274,7 +274,8 @@ contract GeneralReschedulingTask {
     /// @return targetBlock Target block for rescheduling
     /// @return reschedule Whether rescheduling is enabled
     function returnRescheduleData(address target)
-        external
+        public
+        view
         returns (uint256 maxCost, uint256 targetBlock, bool reschedule)
     {
         if (address(this) != _IMPLEMENTATION) {
@@ -297,7 +298,7 @@ contract GeneralReschedulingTask {
     /// @return targetBlock Target block for rescheduling
     /// @return reschedule Whether rescheduling is enabled
     function returnAndClearRescheduleData(address target)
-        external
+        public
         returns (uint256 maxCost, uint256 targetBlock, bool reschedule)
     {
         if (address(this) != _IMPLEMENTATION) {
@@ -320,7 +321,7 @@ contract GeneralReschedulingTask {
 
     /// @notice Clears all stored rescheduling data
     /// @dev Must be called directly on implementation by active task or target
-    function clearRescheduleData() external {
+    function clearRescheduleData() public {
         if (address(this) != _IMPLEMENTATION) {
             revert CantBeDelegated();
         }
@@ -336,13 +337,13 @@ contract GeneralReschedulingTask {
 
     /// @notice Gets the currently active task from the task manager
     /// @return activeTask Address of the currently active task
-    function _activeTask() internal view returns (address activeTask) {
+    function _activeTask() private view returns (address activeTask) {
         activeTask = ITaskManager(_TASK_MANAGER).getCurrentTask();
     }
 
     /// @notice Stores target address in transient storage
     /// @param target Address to store
-    function _storeTarget(address target) internal {
+    function _storeTarget(address target) private {
         bytes32 _targetTransientSlot = _TARGET_NAMESPACE;
         assembly {
             tstore(_targetTransientSlot, target)
@@ -351,7 +352,7 @@ contract GeneralReschedulingTask {
 
     /// @notice Loads target address from transient storage
     /// @return target Stored target address
-    function _loadTarget() internal view returns (address target) {
+    function _loadTarget() private view returns (address target) {
         bytes32 _targetTransientSlot = _TARGET_NAMESPACE;
         assembly {
             target := tload(_targetTransientSlot)
@@ -360,7 +361,7 @@ contract GeneralReschedulingTask {
 
     /// @notice Stores calldata hash in transient storage
     /// @param calldataHash Hash to store
-    function _storeCalldataHash(bytes32 calldataHash) internal {
+    function _storeCalldataHash(bytes32 calldataHash) private {
         bytes32 _calldataTransientSlot = _CALLDATA_NAMESPACE;
         assembly {
             tstore(_calldataTransientSlot, calldataHash)
@@ -369,7 +370,7 @@ contract GeneralReschedulingTask {
 
     /// @notice Loads calldata hash from transient storage
     /// @return calldataHash Stored calldata hash
-    function _loadCalldataHash() internal view returns (bytes32 calldataHash) {
+    function _loadCalldataHash() private view returns (bytes32 calldataHash) {
         bytes32 _calldataTransientSlot = _CALLDATA_NAMESPACE;
         assembly {
             calldataHash := tload(_calldataTransientSlot)
@@ -378,7 +379,7 @@ contract GeneralReschedulingTask {
 
     /// @notice Stores caller address in transient storage
     /// @param expectedCaller Address to store
-    function _storeCaller(address expectedCaller) internal {
+    function _storeCaller(address expectedCaller) private {
         bytes32 _callerTransientSlot = _CALLER_NAMESPACE;
         assembly {
             tstore(_callerTransientSlot, expectedCaller)
@@ -387,7 +388,7 @@ contract GeneralReschedulingTask {
 
     /// @notice Loads caller address from transient storage
     /// @return expectedCaller Stored caller address
-    function _loadCaller() internal view returns (address expectedCaller) {
+    function _loadCaller() private view returns (address expectedCaller) {
         bytes32 _callerTransientSlot = _CALLER_NAMESPACE;
         assembly {
             expectedCaller := tload(_callerTransientSlot)
@@ -399,7 +400,7 @@ contract GeneralReschedulingTask {
     /// @param maxCost Maximum cost allowed for rescheduling
     /// @param targetBlock Target block for rescheduling
     /// @param reschedule Whether to enable rescheduling
-    function _storeRescheduleData(uint256 maxCost, uint256 targetBlock, bool reschedule) internal {
+    function _storeRescheduleData(uint256 maxCost, uint256 targetBlock, bool reschedule) private {
         uint256 _packedRescheduleData = _packRescheduleData(maxCost, targetBlock, reschedule);
 
         bytes32 _rescheduleDataTransientSlot = _RESCHEDULE_NAMESPACE;
@@ -412,7 +413,7 @@ contract GeneralReschedulingTask {
     /// @return maxCost Maximum cost allowed for rescheduling
     /// @return targetBlock Target block for rescheduling
     /// @return reschedule Whether rescheduling is enabled
-    function _loadRescheduleData() internal view returns (uint256 maxCost, uint256 targetBlock, bool reschedule) {
+    function _loadRescheduleData() private view returns (uint256 maxCost, uint256 targetBlock, bool reschedule) {
         bytes32 _rescheduleDataTransientSlot = _RESCHEDULE_NAMESPACE;
         uint256 _packedRescheduleData;
         assembly {
