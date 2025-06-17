@@ -29,26 +29,28 @@ abstract contract RelayTaskScheduler is RelayTaskHelper {
         virtual
         returns (bool success, bytes32 taskID)
     {
-        (address _owner, uint256 _expiration,, bool _isTask) = _abstractedMsgSenderWithContext();
+        (address _owner, uint256 _expiration, bool _isSessionKey, bool _isTask) = _abstractedMsgSenderWithContext();
 
         // Adjust target block - session key cant schedule a task farther out than the session key
         // is valid for, then sanity check the expiration block against target
-        if (expirationBlock > _expiration) expirationBlock = _expiration;
-        if (targetBlock > expirationBlock) {
-            return (false, bytes32(0));
+        if (_isSessionKey || _isTask) {
+            if (expirationBlock > _expiration) expirationBlock = _expiration;
+            if (targetBlock > expirationBlock) {
+                return (false, bytes32(0));
+            }
+        } else {
+            _expiration = expirationBlock;
         }
-
-        // Get the max payment (bonded shMON)
-        uint256 _maxPayment = _amountBondedToThis(_owner);
 
         // Check if this can be rescheduled
         if (_isTask) {
             (address _task,,,) = _loadUnderlyingMsgSenderData();
-            if (IGeneralReschedulingTask(GENERAL_TASK_IMPL).matchCalldataHash(address(this), data)) {
-                (success, targetBlock, _maxPayment) =
-                    _rescheduleTaskAccounting(_task, _owner, gas, _maxPayment, targetBlock, expirationBlock);
+            if (_matchCalldataHash(data)) {
+                uint256 _maxTaskCost;
+                (success, targetBlock, _maxTaskCost) =
+                    _rescheduleTaskAccounting(_task, _owner, gas, _maxPayment(_owner), targetBlock, expirationBlock);
                 if (success) {
-                    IGeneralReschedulingTask(GENERAL_TASK_IMPL).setRescheduleData(_task, _maxPayment, targetBlock, true);
+                    _setRescheduleData(_task, _maxTaskCost, targetBlock, setOwnerAsMsgSenderDuringTask);
                 }
                 // TODO: Manually calculate future task ID in a gas-efficient manner (will require TaskManager
                 // modification)
@@ -57,13 +59,13 @@ abstract contract RelayTaskScheduler is RelayTaskHelper {
         }
 
         // Create task
-        (success, taskID, targetBlock, _maxPayment) = _createTask({
+        (success, taskID,,) = _createTask({
             payor: _owner,
-            maxPayment: _maxPayment,
+            maxPayment: _maxPayment(_owner),
             minExecutionGasRemaining: _minExecutionGasRemaining(),
             targetBlock: targetBlock,
             expirationBlock: expirationBlock,
-            taskImplementation: GENERAL_TASK_IMPL,
+            taskImplementation: GENERAL_TASK_IMPL(),
             taskGas: gas,
             taskData: abi.encodeCall(IGeneralReschedulingTask.execute, (address(this), data))
         });

@@ -3,7 +3,6 @@ pragma solidity 0.8.28;
 
 import { ITaskManager } from "../../../task-manager/interfaces/ITaskManager.sol";
 import { IShMonad } from "../../../shmonad/interfaces/IShMonad.sol";
-import { GasRelayBase } from "./GasRelayBase.sol";
 import { TaskConstants } from "./TaskConstants.sol";
 
 import "forge-std/console.sol";
@@ -11,7 +10,7 @@ import "forge-std/console.sol";
 /// @title RelayTaskHelper
 /// @notice Helper functions for task creation, scheduling, and bond management
 /// @dev Extends TaskConstants and GasRelayBase to provide core task management functionality
-abstract contract RelayTaskHelper is TaskConstants, GasRelayBase {
+abstract contract RelayTaskHelper is TaskConstants {
     uint256 private constant _MAX_SCHEDULING_AND_ESCROW_GAS_USAGE = 191_000;
     uint256 private constant _MAX_SCHEDULING_GAS_USAGE = 151_000;
 
