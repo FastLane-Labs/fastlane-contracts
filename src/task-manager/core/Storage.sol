@@ -31,6 +31,9 @@ abstract contract TaskStorage is TaskEvents, TaskErrors {
     uint64 public constant LARGE_GAS = 750_000;
     uint64 public constant ITERATION_BUFFER = 32_000;
 
+    /// @notice Gas buffer reserved for final cleanup operations after task execution ~6k + payout protocol fees ~16k 
+    uint64 public constant CLEANUP_BUFFER = 35_000;
+
     // These need to be removed when the real fee formula is added
     uint256 internal constant _CONGESTION_GROWTH_RATE = 101_000_000;
     uint256 internal constant _FORECAST_GROWTH_RATE = 25_000; // per 128 blocks, linear

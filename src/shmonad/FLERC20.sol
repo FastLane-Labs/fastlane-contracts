@@ -8,7 +8,7 @@ import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import { IERC20Permit } from "./interfaces/IERC20Full.sol";
 import { ShMonadHolds } from "./Holds.sol";
-import { Balance } from "./Types.sol";
+import { Balance, Supply } from "./Types.sol";
 
 /// @author FastLane Labs
 /// @dev Based on OpenZeppelin's ERC20 implementation, with modifications to support shMonad's storage structure.
@@ -44,11 +44,11 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
      * @dev See {IERC20-totalSupply}.
      */
     function totalSupply() public view returns (uint256) {
-        return s_totalSupply;
+        return uint256(s_supply.total);
     }
 
     function bondedTotalSupply() external view returns (uint256) {
-        return s_bondedTotalSupply;
+        return uint256(s_supply.bondedTotal);
     }
 
     /**
@@ -212,7 +212,7 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
         uint128 value128 = value.toUint128();
         if (from == address(0)) {
             // Overflow check required: The rest of the code assumes that totalSupply never overflows
-            s_totalSupply += value;
+            s_supply.total += value128;
         } else {
             Balance memory fromBalance = s_balances[from];
             uint256 fromUnbonded = fromBalance.unbonded;
@@ -229,10 +229,11 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
         if (to == address(0)) {
             unchecked {
                 // Overflow not possible: value <= totalSupply or value <= fromBalance <= totalSupply.
-                s_totalSupply -= value;
+                // NOTE: IS THIS STILL TRUE?
+                s_supply.total -= value128;
             }
         } else {
-            // Overflow IS possible as s_totalSupply is not a uint128, but Balance.unbonded is.
+            // Overflow IS possible as s_supply.total is not a uint128, but Balance.unbonded is.
             s_balances[to].unbonded += value128;
         }
 

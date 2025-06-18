@@ -10,7 +10,7 @@ import { Directory } from "../common/Directory.sol";
 import { ISponsoredExecutor } from "../common/ISponsoredExecutor.sol";
 import { IAddressHub } from "../common/IAddressHub.sol";
 import { Bonds } from "./Bonds.sol";
-import { BondedData } from "./Types.sol";
+import { BondedData, Supply, Policy, Delivery } from "./Types.sol";
 import { IShMonad } from "./interfaces/IShMonad.sol";
 
 /**
@@ -42,8 +42,8 @@ contract ShMonad is Bonds {
      * @dev This is part of the OpenZeppelin Upgradeable pattern
      * @param deployer The address that will own the contract
      */
-    function initialize(address deployer) public reinitializer(6) {
-        __EIP712_init("ShMonad", "2");
+    function initialize(address deployer) public reinitializer(8) {
+        __EIP712_init("ShMonad", "3");
         __Ownable_init(deployer);
     }
 
@@ -69,8 +69,7 @@ contract ShMonad is Bonds {
         bool inUnderlying
     )
         external
-        onlyActivePolicy(policyID)
-        onlyPolicyAgent(policyID)
+        onlyPolicyAgentAndActive(policyID)
     {
         // Release hold on `from` account if necessary
         if (fromReleaseAmount > 0) _release(policyID, from, fromReleaseAmount);
@@ -82,7 +81,7 @@ contract ShMonad is Bonds {
         // - decrease bonded balance (respecting any holds if not released above)
         // - do not decrease bondedTotalSupply (value stays in bonded form)
         BondedData memory fromBondedData = s_bondedData[policyID][from];
-        _spendFromBonded(fromBondedData, policyID, from, sharesToDeduct, false);
+        _spendFromBonded(fromBondedData, policyID, from, sharesToDeduct, Delivery.Bonded);
         s_bondedData[policyID][from] = fromBondedData;
 
         // Changes to the `to` account - done directly in storage:
@@ -112,8 +111,7 @@ contract ShMonad is Bonds {
         bool inUnderlying
     )
         external
-        onlyActivePolicy(policyID)
-        onlyPolicyAgent(policyID)
+        onlyPolicyAgentAndActive(policyID)
     {
         // Make sure agent isn't unbonding their own balance
         if (from == msg.sender && _isPolicyAgent(policyID, msg.sender)) {
@@ -128,9 +126,9 @@ contract ShMonad is Bonds {
 
         // Changes to the `from` account - done in memory then persisted to storage:
         // - decrease bonded balance (respecting any holds if not released above)
-        // - do not decrease bondedTotalSupply (value stays in bonded form)
+        // - decreases bondedTotalSupply (value converts to unbonded form)
         BondedData memory fromBondedData = s_bondedData[policyID][from];
-        _spendFromBonded(fromBondedData, policyID, from, sharesToDeduct, true);
+        _spendFromBonded(fromBondedData, policyID, from, sharesToDeduct, Delivery.Unbonded);
         s_bondedData[policyID][from] = fromBondedData;
 
         // Increase unbonded balance
@@ -159,8 +157,7 @@ contract ShMonad is Bonds {
         bool inUnderlying
     )
         external
-        onlyPolicyAgent(policyID)
-        onlyActivePolicy(policyID)
+        onlyPolicyAgentAndActive(policyID)
     {
         // Make sure agent isn't unbonding their own balance
         if (from == msg.sender && _isPolicyAgent(policyID, msg.sender)) {
@@ -187,15 +184,23 @@ contract ShMonad is Bonds {
         // - decrease bonded balance (respecting any holds if not released above)
         // - decrease bondedTotalSupply (value leaving bonded form)
         BondedData memory fromBondedData = s_bondedData[policyID][from];
-        _spendFromBonded(fromBondedData, policyID, from, sharesToDeduct, true);
+        _spendFromBonded(fromBondedData, policyID, from, sharesToDeduct, Delivery.Underlying);
         s_bondedData[policyID][from] = fromBondedData;
 
-        // Increase to's unbonded shMON balance in prep for withdrawal below
-        s_balances[to].unbonded += sharesToDeduct;
-
-        // Skips approval checks in ERC4626 redeem func, burns deducted shares, transfers assets to `to`
-        _burn(to, sharesToDeduct);
+        // TODO: Integrate FastLane ClearingHouse for atomic ShMON -> MON conversions without
+        // withdrawal queue. Relative to the current version, builders preparing for the prod
+        // version of ShMonad should expect a moderate gas cost increase (~30-40k)and a dynamic,
+        // utilization-based fee on all atomic ShMON -> MON conversions.
+        //
+        // You can read more about the ClearingHouse here:
+        //      https://www.fastlane.xyz/ClearingHouse_Whitepaper.pdf
+        //
+        // NOTE: ClearingHouse integration is blocked by the unavailability of the Monad Staking
+        // contracts.
         to.safeTransferETH(assetsToReceive);
+        // NOTE: Supporting duration-staked assets without also integrating the ClearingHouse
+        // would allow depositors to instantly bypass a withdrawal queue by creating their
+        // own policy, bonding their shMON to it, and then calling this function.
 
         emit AgentWithdrawFromBonded(policyID, from, to, assetsToReceive);
     }
@@ -219,8 +224,7 @@ contract ShMonad is Bonds {
         bool inUnderlying
     )
         external
-        onlyPolicyAgent(policyID)
-        onlyActivePolicy(policyID)
+        onlyPolicyAgentAndActive(policyID)
     {
         // TODO: Consider adding this check
         /*
@@ -249,14 +253,12 @@ contract ShMonad is Bonds {
         // - decrease bonded balance (respecting any holds if not released above)
         // - decrease bondedTotalSupply (value leaving bonded form)
         BondedData memory fromBondedData = s_bondedData[policyID][from];
-        _spendFromBonded(fromBondedData, policyID, from, sharesToDeduct, true);
+
+        // NOTE: Delivery out is marked in Underlying to convey that the supply is being burned
+        // NOTE: No ClearingHouse integration is needed here
+        _spendFromBonded(fromBondedData, policyID, from, sharesToDeduct, Delivery.Underlying);
+
         s_bondedData[policyID][from] = fromBondedData;
-
-        // Increase to's unbonded shMON balance in prep for withdrawal below
-        s_balances[from].unbonded += sharesToDeduct;
-
-        // Skips approval checks in ERC4626 redeem func, burns deducted shares, transfers assets to `to`
-        _burn(from, sharesToDeduct);
 
         emit AgentBoostYieldFromBonded(policyID, from, assetsToReceive);
     }
@@ -282,8 +284,7 @@ contract ShMonad is Bonds {
     )
         external
         payable
-        onlyPolicyAgent(policyID)
-        onlyActivePolicy(policyID)
+        onlyPolicyAgentAndActive(policyID)
         returns (uint128 actualPayorCost, bool success, bytes memory returnData)
     {
         // Offset added to account for gas cost incurred after actualGasCost calculation at end
@@ -305,7 +306,7 @@ contract ShMonad is Bonds {
         uint128 sharesDeducted128 = sharesDeducted.toUint128();
 
         // Charge payor's bonded balance for actual gas cost + any msgValue not covered by agent
-        _spendFromBonded(payorBondedData, policyID, payor, sharesDeducted128, true);
+        _spendFromBonded(payorBondedData, policyID, payor, sharesDeducted128, Delivery.Bonded);
 
         // Persist payor's BondedData changes to storage
         s_bondedData[policyID][payor] = payorBondedData;

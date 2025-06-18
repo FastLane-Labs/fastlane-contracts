@@ -40,6 +40,25 @@ abstract contract TaskLoadBalancer is TaskStorage {
     constructor(address shMonad, uint64 policyId) TaskStorage(shMonad, policyId) { }
 
     /**
+     * @notice Initialize LoadBalancer state with optional reset
+     * @dev Resets LoadBalancer state if reset flag is true, otherwise preserves existing state
+     * @param reset Whether to reset LoadBalancer state to current block
+     * TODO: Review LoadBalancer initialization strategy for mainnet deployment
+     * Consider whether conditional reset based on block distance is appropriate
+     */
+    function __initializeLoadBalancer(bool reset) internal {
+        if (reset) {
+            // Reset LoadBalancer with current block number
+            uint64 currentBlock = uint64(block.number) - 1;
+            S_loadBalancer.activeBlockSmall = currentBlock;
+            S_loadBalancer.activeBlockMedium = currentBlock;
+            S_loadBalancer.activeBlockLarge = currentBlock;
+            S_loadBalancer.targetDelay = uint32(3);
+        }
+        // Otherwise preserve existing LoadBalancer state to maintain scheduled tasks
+    }
+
+    /**
      * @notice Allocates load for task execution based on available gas and task metrics
      * @dev Determines which queue (Small, Medium, Large) to process based on:
      * 1. Available gas for execution
@@ -69,11 +88,12 @@ abstract contract TaskLoadBalancer is TaskStorage {
     {
         loadBalancer = S_loadBalancer;
 
-        if (gasleft() < targetGasReserve + ITERATION_BUFFER + 5000) {
+        uint256 gasRequired = targetGasReserve + ITERATION_BUFFER + CLEANUP_BUFFER;
+        if (gasleft() <= gasRequired) {
             return (loadBalancer, size, blockNumber, tasksAvailable);
         }
 
-        uint256 _gasAvailable = gasleft() - targetGasReserve - ITERATION_BUFFER - 5000;
+        uint256 _gasAvailable = gasleft() - gasRequired;
 
         // 1. Try Large queue if we have enough gas and it has longest delay
         if (
@@ -127,11 +147,12 @@ abstract contract TaskLoadBalancer is TaskStorage {
 
         require(!trackers.updateAllTrackers, "ERR-Unreachable1");
 
-        if (gasleft() < trackers.targetGasReserve + ITERATION_BUFFER + 5000) {
+        uint256 gasRequired = trackers.targetGasReserve + ITERATION_BUFFER + CLEANUP_BUFFER;
+        if (gasleft() <= gasRequired) {
             trackers.tasksAvailable = false;
             return trackers;
         }
-        uint256 _gasAvailable = gasleft() - trackers.targetGasReserve - ITERATION_BUFFER - 5000;
+        uint256 _gasAvailable = gasleft() - gasRequired;
 
         // Try to reallocate to medium if currently on large or no size
         if (

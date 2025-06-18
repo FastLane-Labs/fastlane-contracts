@@ -3,7 +3,7 @@ pragma solidity 0.8.28;
 
 import { ShMonadStorage } from "./Storage.sol";
 import { HoldsLib } from "./libraries/HoldsLib.sol";
-import { PolicyAccount, BondedData } from "./Types.sol";
+import { PolicyAccount, BondedData, Policy } from "./Types.sol";
 import { IShMonad } from "./interfaces/IShMonad.sol";
 
 /**
@@ -29,7 +29,7 @@ abstract contract ShMonadHolds is ShMonadStorage {
      * @dev If a hold is already active for an account, the new amount will be added to the existing hold
      * @dev Will revert if the account's bonded value is insufficient to cover the hold
      */
-    function hold(uint64 policyID, address account, uint256 amount) external onlyPolicyAgent(policyID) {
+    function hold(uint64 policyID, address account, uint256 amount) external onlyPolicyAgentAndActive(policyID) {
         _hold(policyID, account, amount);
     }
 
@@ -38,7 +38,7 @@ abstract contract ShMonadHolds is ShMonadStorage {
      * @dev Deducts amount from any existing hold on the account
      * @dev If release amount exceeds the held amount, the hold will be set to 0
      */
-    function release(uint64 policyID, address account, uint256 amount) external onlyPolicyAgent(policyID) {
+    function release(uint64 policyID, address account, uint256 amount) external onlyPolicyAgentAndActive(policyID) {
         _release(policyID, account, amount);
     }
 
@@ -53,7 +53,7 @@ abstract contract ShMonadHolds is ShMonadStorage {
         uint256[] memory amounts
     )
         external
-        onlyPolicyAgent(policyID)
+        onlyPolicyAgentAndActive(policyID)
     {
         for (uint256 i = 0; i < accounts.length; ++i) {
             _hold(policyID, accounts[i], amounts[i]);
@@ -70,7 +70,7 @@ abstract contract ShMonadHolds is ShMonadStorage {
         uint256[] calldata amounts
     )
         external
-        onlyPolicyAgent(policyID)
+        onlyPolicyAgentAndActive(policyID)
     {
         for (uint256 i = 0; i < accounts.length; ++i) {
             _release(policyID, accounts[i], amounts[i]);
@@ -137,8 +137,12 @@ abstract contract ShMonadHolds is ShMonadStorage {
      * @dev Checks if the msg.sender is an agent for the specified policy
      * @param policyID The ID of the policy to check agent status for
      */
-    modifier onlyPolicyAgent(uint64 policyID) {
-        require(_isPolicyAgent(policyID, msg.sender), NotPolicyAgent(policyID, msg.sender));
+    modifier onlyPolicyAgentAndActive(uint64 policyID) {
+        Policy memory _policy = s_policies[policyID];
+        require(_policy.active, PolicyInactive(policyID));
+        if (msg.sender != _policy.primaryAgent) {
+            require(_isPolicyAgent(policyID, msg.sender), NotPolicyAgent(policyID, msg.sender));
+        }
         _;
     }
 }
