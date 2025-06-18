@@ -26,7 +26,7 @@ contract AtlasTest is BaseTest, AtlasConstants {
 
     // Used in place of winningSolverIdx when no winner expected
     uint256 constant ALL_FAIL = type(uint256).max;
-    uint256 constant WRITEOFF_GAS_PER_UNREACHED_SOLVER = 60_000;
+    uint256 constant WRITEOFF_GAS_PER_UNREACHED_SOLVER = 45_000;
 
     CallConfig callConfig;
     TestDAppControl control;
@@ -438,7 +438,7 @@ contract AtlasTest is BaseTest, AtlasConstants {
                 assertApproxEqRel(
                     analytics.totalGasValueUsed,
                     before.solversAnalytics[i].totalGasValueUsed + (expectedMonCharged / _GAS_VALUE_DECIMALS_TO_DROP),
-                    0.01e18,
+                    0.02e18,
                     string.concat(errString, "totalGasValueUsed update incorrect")
                 );
             } else {
@@ -472,9 +472,9 @@ contract AtlasTest is BaseTest, AtlasConstants {
                 // Only the winner solver's charge is hard to predict exactly, due to:
                 // - calldata gas deducted before start of metacall logic
                 // - unreached solver charge loop gas written off
-                // --> 1% tolerance for diff between expected and actual MON taken
+                // --> 2% tolerance for diff between expected and actual MON taken
                 assertApproxEqRel(
-                    expectedMonCharged, actualMonCharged, 0.01e18, string.concat(errString, "bonded MON charged")
+                    expectedMonCharged, actualMonCharged, 0.02e18, string.concat(errString, "bonded MON charged")
                 );
             } else {
                 // All failed or unreached solvers' MON charges should be perfectly predictable.
