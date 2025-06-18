@@ -13,6 +13,11 @@ struct Balance {
     uint128 bonded; // Account's bonded shMON balance across all policies
 }
 
+struct Supply {
+    uint128 total;
+    uint128 bondedTotal;
+}
+
 struct BondedData {
     uint128 bonded; // Account's bonded amount in the current Policy (excl. unbonding)
     uint128 minBonded; // Account's minimum bonded amount in the current Policy
@@ -39,10 +44,17 @@ struct TopUpSettings {
 struct Policy {
     uint48 escrowDuration; // Unbonding period of the Policy
     bool active; // Whether the Policy is active or not
+    address primaryAgent; // Most frequently-calling agent (for gas efficiency)
 }
 
 // For HoldsLib - never used in storage
 struct PolicyAccount {
     uint64 policyID;
     address account;
+}
+
+enum Delivery {
+    Bonded,
+    Unbonded,
+    Underlying
 }

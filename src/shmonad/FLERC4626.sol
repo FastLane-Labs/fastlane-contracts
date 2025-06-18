@@ -86,6 +86,21 @@ abstract contract FastLaneERC4626 is FastLaneERC20 {
         uint256 shares = previewWithdraw(assets);
         _withdraw(_msgSender(), receiver, owner, assets, shares);
 
+        // TODO: Integrate FastLane ClearingHouse for atomic ShMON -> MON conversions without
+        // withdrawal queue. Relative to the current version, builders preparing for the prod
+        // version of ShMonad should expect a moderate gas cost increase (~30-40k)and a dynamic,
+        // utilization-based fee on all atomic ShMON -> MON conversions.
+        //
+        // You can read more about the ClearingHouse here:
+        //      https://www.fastlane.xyz/ClearingHouse_Whitepaper.pdf
+        //
+        // NOTE: ClearingHouse integration is blocked by the unavailability of the Monad Staking
+        // contracts.
+        receiver.safeTransferETH(assets);
+        // NOTE: Builders working with the ShMonad contracts can expect this function to maintain
+        // its ability to withdraw MON atomically. A separate, asynchronous withdrawal function
+        // will be added for depositors wishing to withdraw via queue rather than ClearingHouse
+
         return shares;
     }
 
@@ -100,6 +115,21 @@ abstract contract FastLaneERC4626 is FastLaneERC20 {
 
         uint256 assets = previewRedeem(shares);
         _withdraw(_msgSender(), receiver, owner, assets, shares);
+
+        // TODO: Integrate FastLane ClearingHouse for atomic ShMON -> MON conversions without
+        // withdrawal queue. Relative to the current version, builders preparing for the prod
+        // version of ShMonad should expect a moderate gas cost increase (~30-40k)and a dynamic,
+        // utilization-based fee on all atomic ShMON -> MON conversions.
+        //
+        // You can read more about the ClearingHouse here:
+        //      https://www.fastlane.xyz/ClearingHouse_Whitepaper.pdf
+        //
+        // NOTE: ClearingHouse integration is blocked by the unavailability of the Monad Staking
+        // contracts.
+        receiver.safeTransferETH(assets);
+        // NOTE: Builders working with the ShMonad contracts can expect this function to maintain
+        // its ability to withdraw MON atomically. A separate, asynchronous withdrawal function
+        // will be added for depositors wishing to withdraw via queue rather than ClearingHouse
 
         return assets;
     }
@@ -171,8 +201,6 @@ abstract contract FastLaneERC4626 is FastLaneERC20 {
         }
 
         _burn(owner, shares);
-
-        receiver.safeTransferETH(assets);
 
         emit Withdraw(caller, receiver, owner, assets, shares);
     }

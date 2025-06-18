@@ -203,8 +203,11 @@ abstract contract GasRelayBase is GasRelayHelper {
             return msg.sender;
         }
 
+        // If owner is calling as itself, pass it through the self.try/catch
         if (!_isCallerSessionKey && !_isCallerTask) {
-            return msg.sender;
+            if (msg.sender == address(this) || msg.sender == _underlyingMsgSender) {
+                return _underlyingMsgSender;
+            }
         }
 
         if (msg.sender == address(this) || msg.sender == _underlyingMsgSender) {

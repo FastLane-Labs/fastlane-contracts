@@ -6,14 +6,21 @@ import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import { FastLaneERC4626 } from "./FLERC4626.sol";
 import { PolicyERC20Wrapper } from "./PolicyERC20Wrapper.sol";
-import { Balance, Policy, PolicyAccount, BondedData, UnbondingData, TopUpData, TopUpSettings } from "./Types.sol";
+import {
+    Balance,
+    Policy,
+    PolicyAccount,
+    BondedData,
+    UnbondingData,
+    TopUpData,
+    TopUpSettings,
+    Delivery,
+    Supply
+} from "./Types.sol";
 
 import { ShMonadStorage } from "./Storage.sol";
 
 import { ITaskManager } from "../task-manager/interfaces/ITaskManager.sol";
-import { Directory } from "../common/Directory.sol";
-import { UnbondingTask } from "./tasks/UnbondingTask.sol";
-import { IAddressHub } from "../common/IAddressHub.sol";
 import { IShMonad } from "./interfaces/IShMonad.sol";
 
 /**
@@ -281,7 +288,7 @@ abstract contract Bonds is FastLaneERC4626 {
      */
     function createPolicy(uint48 escrowDuration) external returns (uint64 policyID, address policyERC20Wrapper) {
         policyID = ++s_policyCount; // First policyID is 1
-        s_policies[policyID] = Policy(escrowDuration, true);
+        s_policies[policyID] = Policy(escrowDuration, true, msg.sender);
         _addPolicyAgent(policyID, msg.sender); // Add caller as first agent of the policy
 
         // TODO refactor this to minimal proxy with PolicyERC20WrapperLib for gas efficiency
@@ -314,7 +321,7 @@ abstract contract Bonds is FastLaneERC4626 {
      * @inheritdoc IShMonad
      * @dev Only callable by a policy agent. This action is irreversible.
      */
-    function disablePolicy(uint64 policyID) external onlyPolicyAgent(policyID) {
+    function disablePolicy(uint64 policyID) external onlyPolicyAgentAndActive(policyID) {
         s_policies[policyID].active = false;
 
         emit DisablePolicy(policyID);
@@ -451,7 +458,7 @@ abstract contract Bonds is FastLaneERC4626 {
 
             // Increase bondedTotalSupply if requested
             if (changeBondedTotalSupply) {
-                s_bondedTotalSupply += shares;
+                s_supply.bondedTotal += shares128;
             }
         }
 
@@ -502,7 +509,7 @@ abstract contract Bonds is FastLaneERC4626 {
             s_balances[account].bonded -= shares128;
 
             // Also decrease totalBondedSupply due to decrease in bonded balance
-            s_bondedTotalSupply -= shares128;
+            s_supply.bondedTotal -= shares128;
 
             // Increase account's unbonding balance and update unbondStartBlock
             unbondingData.unbonding += shares128;
@@ -566,74 +573,150 @@ abstract contract Bonds is FastLaneERC4626 {
      * @param policyID The ID of the policy
      * @param account The address whose bonded balance is being decreased
      * @param shares The amount of shMON shares to spend
-     * @param decreaseBondedTotalSupply Whether to decrease the bondedTotalSupply
+     * @param out Whether to decrease the bondedTotalSupply
      * @dev Implementation details:
      * 1. Calculates available funds after deducting holds
-     * 2. If insufficient funds, attempts to top-up from unbonded balance
-     * 3. If still insufficient funds but funds + unbonding balance is enough, takes from unbonding balance
-     * 4. If still insufficient after top-up and unbonding, reverts with InsufficientFunds error
+     * 2. If insufficient funds, first try take from account's unbonding balance
+     * 3. If still insufficient funds, attempt top-up from account's unbonded balance
+     * 4. If still insufficient after trying unbonding and top-up sources, reverts with InsufficientFunds error
      * 5. Updates balances in memory structures (must be persisted to storage separately)
-     * 6. Decreases bondedTotalSupply if requested
+     * 6. Decreases both bondedTotalSupply and totalSupply, depending on the `out` parameter
      */
     function _spendFromBonded(
         BondedData memory bondedData,
         uint64 policyID,
         address account,
         uint128 shares,
-        bool decreaseBondedTotalSupply
+        Delivery out
     )
         internal
     {
         Balance memory balance = s_balances[account];
+        TopUpData memory topUpData = s_topUpData[policyID][account];
         uint128 held128 = _getHoldAmount(policyID, account).toUint128();
         uint128 fundsAvailable = bondedData.bonded - held128; // Initially just unheld bonded balance
-        uint128 takenFromUnbonding; // remains 0 unless required below
+        uint128 bondedSupplyIncrease; // remains 0 unless required below
 
-        // If deduction amount exceeds unheld bonded balance
+        // If account's bonded balance is insufficient, try make up the shortfall from other sources in this order:
+        // 1) Unbonding balance
+        // 2) Unbonded balance, if top-up is enabled
+
+        // First, try take from unbonding balance
+        if (fundsAvailable < shares) {
+            // Load account's unbonding data
+            UnbondingData memory _unbondingData = s_unbondingData[policyID][account];
+            uint128 takenFromUnbonding;
+
+            if (fundsAvailable + _unbondingData.unbonding >= shares) {
+                // we can take the shortfall from account's unbonding balance
+                unchecked {
+                    takenFromUnbonding = shares - fundsAvailable;
+                    _unbondingData.unbonding -= takenFromUnbonding;
+                }
+            } else {
+                takenFromUnbonding = _unbondingData.unbonding;
+                _unbondingData.unbonding = 0;
+            }
+
+            // If spending from account's unbonding funds, must to reverse the changes made to any balances or totals
+            // made in `_unbondFromPolicy()` when account starting the unbonding action:
+
+            // Increase account's policy-specific bonded balance
+            bondedData.bonded += takenFromUnbonding;
+            // Increase account's total bonded balance
+            balance.bonded += takenFromUnbonding;
+            // Track increase in global supply.bondedTotal, applied at end of this function
+            bondedSupplyIncrease += takenFromUnbonding;
+
+            // Persist unbonding data to storage
+            s_unbondingData[policyID][account] = _unbondingData;
+
+            // Update fundsAvailable after moving funds from unbonding to bonded above
+            fundsAvailable = bondedData.bonded - held128;
+        }
+
+        // Second, if fundsAvailable is still insufficient, try top-up from unbonded balance
         if (fundsAvailable < shares) {
             // CASE: deduct amount exceeds account's unheld bonded balance
             // --> attempt top-up
             uint128 bondedShortfall = shares - fundsAvailable;
-            _tryTopUp(balance, bondedData, policyID, account, bondedShortfall);
-        } else {
-            // CASE: deduct amount will cause account's bonded to fall below minBonded threshold
-            // --> attempt top-up
-            uint128 balanceAfterDeduct = fundsAvailable - shares;
-            if (balanceAfterDeduct < bondedData.minBonded) {
-                // Only top up account's bonded by amount needed to get it back to minBonded threshold
-                _tryTopUp(balance, bondedData, policyID, account, bondedData.minBonded - balanceAfterDeduct);
-            }
+
+            uint128 topUpAmount;
+            (topUpData, topUpAmount) = _tryTopUp(topUpData, balance, bondedData, policyID, account, bondedShortfall);
+
+            // supply.bondedTotal will be increased by any top-up amount, at the end of this function
+            bondedSupplyIncrease += topUpAmount;
+
+            // Update fundsAvailable again after top-up
+            fundsAvailable = bondedData.bonded - held128;
         }
 
-        // Now, with bonded potentially topped up, check fundsAvailable again
-        fundsAvailable = bondedData.bonded - held128;
-        if (fundsAvailable >= shares) {
-            // Enough unheld bonded funds to fulfill spend request
-        } else if (fundsAvailable + s_unbondingData[policyID][account].unbonding >= shares) {
-            // we can take the shortfall from account's unbonding balance
-            unchecked {
-                takenFromUnbonding = shares - fundsAvailable;
-                s_unbondingData[policyID][account].unbonding -= takenFromUnbonding;
-            }
-        } else {
+        // If fundsAvailable is still insufficient after attempting to draw from unbonding and unbonded via top-up,
+        // revert with InsufficientFunds error
+        if (fundsAvailable < shares) {
             revert InsufficientFunds(bondedData.bonded, s_unbondingData[policyID][account].unbonding, held128, shares);
         }
 
-        // Safe to do unchecked subtractions due to check in require() above
-        unchecked {
-            // First reduce original amount by any unbonding balance that contributed to the spend
-            if (takenFromUnbonding > 0) shares -= takenFromUnbonding;
+        // Attempt to keep account's bonded balance topped up to their minBonded level
+        if (fundsAvailable - shares < bondedData.minBonded) {
+            uint128 topUpAmount;
 
+            (topUpData, topUpAmount) = _tryTopUp(
+                topUpData, balance, bondedData, policyID, account, bondedData.minBonded - (fundsAvailable - shares)
+            );
+
+            // supply.bondedTotal will be increased by any top-up amount, at the end of this function
+            bondedSupplyIncrease += topUpAmount;
+        }
+
+        // Safe to do unchecked subtractions due to early revert above if underflow would occur
+        unchecked {
             // Decrease account's bonded balance (in the policy and total balances)
             bondedData.bonded -= shares;
             balance.bonded -= shares;
-
-            // Decrease bondedTotalSupply by amount, if requested
-            if (decreaseBondedTotalSupply) s_bondedTotalSupply -= uint256(shares);
         }
 
-        // Persist Balance changes to storage
+        if (out == Delivery.Bonded) {
+            // CASE: Bonded ShMON -> Bonded ShMON
+            // --> Do nothing to total supply
+        } else if (out == Delivery.Unbonded) {
+            // CASE: Bonded ShMON -> Unbonded ShMON
+            // --> Decrease bondedTotalSupply but not totalSupply (no shMON burnt)
+            Supply memory _supply = s_supply;
+
+            // NOTE: Cannot assume shares > bondedSupplyIncrease, due to potential top-up to minBonded level
+            // First increase supply.bondedTotal by any newly-bonded shares
+            _supply.bondedTotal += bondedSupplyIncrease;
+            // Then decrease supply.bondedTotal by the shares being spent
+            _supply.bondedTotal -= shares;
+
+            // Persist supply changes to storage
+            s_supply = _supply;
+        } else {
+            // CASE: Bonded ShMON -> Underlying MON
+            // (i.e. if out == Delivery.Underlying)
+            // --> Decrease both bondedTotalSupply and totalSupply (shMON burnt)
+            Supply memory _supply = s_supply;
+
+            // NOTE: Cannot assume shares > bondedSupplyIncrease, due to potential top-up to minBonded level
+            // First increase supply.bondedTotal by any newly-bonded shares
+            _supply.bondedTotal += bondedSupplyIncrease;
+            // Then decrease supply.bondedTotal by the shares being spent
+            _supply.bondedTotal -= shares;
+            // Finally, decrease supply.total (unbonded) by shares which will be burnt for underlying
+            _supply.total -= shares;
+
+            // Persist supply changes to storage
+            s_supply = _supply;
+        }
+
+        // Persist Balance changes in memory struct to storage
         s_balances[account] = balance;
+
+        // Persist TopUpData changes in memory struct to storage
+        s_topUpData[policyID][account] = topUpData;
+
+        // NOTE: BondedData changes must be persisted to storage separately.
     }
 
     /**
@@ -652,6 +735,7 @@ abstract contract Bonds is FastLaneERC4626 {
      * 5. Emits Bond event for the top-up transaction
      */
     function _tryTopUp(
+        TopUpData memory topUpData,
         Balance memory balance,
         BondedData memory bondedData,
         uint64 policyID,
@@ -659,9 +743,8 @@ abstract contract Bonds is FastLaneERC4626 {
         uint128 sharesToBond
     )
         internal
-        returns (bool)
+        returns (TopUpData memory, uint128 bondedSupplyIncrease)
     {
-        TopUpData memory topUpData = s_topUpData[policyID][account];
         TopUpSettings memory topUpSettings = s_topUpSettings[policyID][account];
 
         if (block.number > topUpData.topUpPeriodStartBlock + topUpSettings.topUpPeriodDuration) {
@@ -670,10 +753,10 @@ abstract contract Bonds is FastLaneERC4626 {
             topUpData.topUpPeriodStartBlock = uint48(block.number);
         } else {
             // If in same top-up period, check if top-up amount is exceeded
-            if (topUpData.totalPeriodTopUps + sharesToBond > topUpSettings.maxTopUpPerPeriod) return false;
+            if (topUpData.totalPeriodTopUps + sharesToBond > topUpSettings.maxTopUpPerPeriod) return (topUpData, 0);
         }
 
-        if (balance.unbonded < sharesToBond) return false;
+        if (balance.unbonded < sharesToBond) return (topUpData, 0);
 
         unchecked {
             // Changes to account's memory structs.
@@ -687,17 +770,14 @@ abstract contract Bonds is FastLaneERC4626 {
             balance.bonded += sharesToBond;
 
             // Increase bondedTotalSupply
-            s_bondedTotalSupply += sharesToBond;
+            // s_supply.bondedTotal += sharesToBond;
+            bondedSupplyIncrease = sharesToBond;
         }
-
-        // Persist TopUpData changes in memory struct to storage
-        // NOTE: Balance and BondedData changes must be persisted to storage separately.
-        s_topUpData[policyID][account] = topUpData;
 
         // Same event as if bond() was called by the account
         emit Bond(policyID, msg.sender, sharesToBond);
 
-        return true;
+        return (topUpData, bondedSupplyIncrease);
     }
 
     /**
@@ -740,6 +820,11 @@ abstract contract Bonds is FastLaneERC4626 {
                 s_policyAgents[policyID].pop();
                 break;
             }
+        }
+
+        // Remove as primary, if applicable
+        if (agent == s_policies[policyID].primaryAgent && s_policyAgents[policyID].length != 0) {
+            s_policies[policyID].primaryAgent = s_policyAgents[policyID][0];
         }
     }
 

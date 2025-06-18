@@ -3,7 +3,6 @@ pragma solidity 0.8.28;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
-
 import { Task, Size, Depth, LoadBalancer, Tracker, Trackers } from "../types/TaskTypes.sol";
 import { TaskPricing } from "./Pricing.sol";
 import { TaskBits } from "../libraries/TaskBits.sol";
@@ -76,7 +75,7 @@ abstract contract TaskExecutor is TaskPricing {
     /// - SMALL_GAS for task execution
     /// - ITERATION_BUFFER for iteration overhead
     /// - targetGasReserve for post-execution operations
-    /// - 5000 for final cleanup
+    /// - CLEANUP_BUFFER for final cleanup
     ///
     /// @param payoutAddress Address to receive execution fees
     /// @param targetGasReserve Gas to reserve for post-execution operations
@@ -87,14 +86,14 @@ abstract contract TaskExecutor is TaskPricing {
         // - SMALL_GAS for task execution
         // - ITERATION_BUFFER for iteration overhead
         // - targetGasReserve (requested by executor)
-        // - 5000 for final operations
-        if (gasleft() < SMALL_GAS + ITERATION_BUFFER + targetGasReserve + 5000) {
+        // - CLEANUP_BUFFER for final operations
+        if (gasleft() < SMALL_GAS + ITERATION_BUFFER + targetGasReserve + CLEANUP_BUFFER) {
             return 0;
         }
 
         // Initial allocation
         Trackers memory _trackers = _initTrackers(targetGasReserve);
-        uint256 _minLeftoverGas = _maxGasFromSize(_trackers.size) + ITERATION_BUFFER + targetGasReserve + 5000;
+        uint256 _minLeftoverGas = _maxGasFromSize(_trackers.size) + ITERATION_BUFFER + targetGasReserve + CLEANUP_BUFFER;
         uint256 _totalFeesEarned;
 
         // Process queues while we have gas
@@ -115,7 +114,7 @@ abstract contract TaskExecutor is TaskPricing {
             }
             // Try to reallocate to a different queue
             _trackers = _reallocateLoad(_trackers);
-            _minLeftoverGas = _maxGasFromSize(_trackers.size) + ITERATION_BUFFER + targetGasReserve + 5000;
+            _minLeftoverGas = _maxGasFromSize(_trackers.size) + ITERATION_BUFFER + targetGasReserve + CLEANUP_BUFFER;
         } while (gasleft() > _minLeftoverGas);
 
         // Handle payouts if we earned any fees
@@ -146,7 +145,7 @@ abstract contract TaskExecutor is TaskPricing {
     /// - requiredGas based on task size
     /// - ITERATION_BUFFER for overhead
     /// - targetGasReserve for cleanup
-    /// - 5000 for final operations
+    /// - CLEANUP_BUFFER for final operations
     ///
     /// @param trackers Current state of task metrics and execution progress
     /// @param targetGasReserve Gas to reserve for post-execution operations

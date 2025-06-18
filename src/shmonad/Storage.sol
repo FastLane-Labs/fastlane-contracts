@@ -3,7 +3,7 @@ pragma solidity 0.8.28;
 
 import { ShMonadErrors } from "./Errors.sol";
 import { ShMonadEvents } from "./Events.sol";
-import { Balance, Policy, BondedData, UnbondingData, TopUpData, TopUpSettings } from "./Types.sol";
+import { Balance, Policy, BondedData, UnbondingData, TopUpData, TopUpSettings, Supply } from "./Types.sol";
 import { IShMonad } from "./interfaces/IShMonad.sol";
 
 abstract contract ShMonadStorage is ShMonadErrors, ShMonadEvents, IShMonad {
@@ -37,6 +37,11 @@ abstract contract ShMonadStorage is ShMonadErrors, ShMonadEvents, IShMonad {
 
     // Added in 1.2
     mapping(address task => bytes32 policyIdUserHash) internal s_userTaskClaims;
+
+    // Added in 1.3
+    // NOTE: Move this to replace s_totalSupply / bonded in prod, but keep as separate storage
+    // on testnet to prevent disrupting balances.
+    Supply internal s_supply;
 
     // --------------------------------------------- //
     //                  View Functions               //

@@ -32,8 +32,9 @@ contract SetupTaskManager is Test {
         address tempImplementation = address(new MockProxyImplementation());
 
         bytes memory initCalldata = abi.encodeWithSignature(
-            "initialize(address)",
-            deployer
+            "initialize(address, bool)",
+            deployer,
+            true
         );
 
         (TransparentUpgradeableProxy _proxy, ProxyAdmin _proxyAdmin) =
@@ -64,8 +65,9 @@ contract SetupTaskManager is Test {
         // use deployer to upgrade implementation
         vm.startPrank(deployer);
         bytes memory initCalldata = abi.encodeWithSignature(
-            "initialize(address)",
-            deployer
+            "initialize(address,bool)",
+            deployer,
+            true
         );
 
         // Deploy TaskManagerEntrypoint Implementation
