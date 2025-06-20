@@ -156,11 +156,13 @@ abstract contract GasRelayBase is GasRelayHelper {
     /// @notice Modifier that enables gas abstraction through session keys
     /// @dev Handles the complete gas abstraction flow including reimbursement and task execution
     modifier GasAbstracted() {
+        uint256 _startingGas = gasleft() + _BASE_TX_GAS_USAGE + (msg.data.length * _NONZERO_CALLDATA_CHAR_COST);
+
         _checkForReentrancy();
         // NOTE: Locking is handled inside the _startShMonadGasAbstraction method.
 
         // Initialize gas abstraction tracking and identify session key
-        GasAbstractionTracker memory gasAbstractionTracker = _startShMonadGasAbstraction(msg.sender);
+        GasAbstractionTracker memory gasAbstractionTracker = _startShMonadGasAbstraction(msg.sender, _startingGas);
 
         // Execute the intended function
         _;
@@ -168,10 +170,10 @@ abstract contract GasRelayBase is GasRelayHelper {
         // Process unused gas through task manager if possible
         if (!_isTask()) {
             gasAbstractionTracker = _handleUnusedGas(gasAbstractionTracker, _MIN_REMAINDER_GAS_BUFFER);
-        }
 
-        // Handle gas reimbursement for the transaction
-        _finishShMonadGasAbstraction(gasAbstractionTracker);
+            // Handle gas reimbursement for the transaction
+            _finishShMonadGasAbstraction(gasAbstractionTracker);
+        }
 
         // Clean up the transaction context
         _unlock(false);
@@ -349,7 +351,10 @@ abstract contract GasRelayBase is GasRelayHelper {
     /// @dev Sets up tracking and context for gas abstraction handling
     /// @param caller Address initiating the transaction
     /// @return gasAbstractionTracker Initial gas tracking state
-    function _startShMonadGasAbstraction(address caller)
+    function _startShMonadGasAbstraction(
+        address caller,
+        uint256 startingGas
+    )
         internal
         returns (GasAbstractionTracker memory gasAbstractionTracker)
     {
@@ -366,7 +371,7 @@ abstract contract GasRelayBase is GasRelayHelper {
                 owner: caller, // Beneficiary of any task execution credits
                 key: address(0),
                 expiration: 0,
-                startingGasLeft: gasleft() + _BASE_TX_GAS_USAGE + (msg.data.length * _NONZERO_CALLDATA_CHAR_COST),
+                startingGasLeft: startingGas,
                 credits: 0
             });
             _storeUnderlyingMsgSender(CallerType.Owner);
@@ -378,7 +383,7 @@ abstract contract GasRelayBase is GasRelayHelper {
                 owner: _sessionKey.owner,
                 key: address(0),
                 expiration: _sessionKey.expiration,
-                startingGasLeft: gasleft() + _BASE_TX_GAS_USAGE + (msg.data.length * _NONZERO_CALLDATA_CHAR_COST),
+                startingGasLeft: startingGas,
                 credits: 0
             });
             _storeUnderlyingMsgSender(CallerType.Task);
@@ -390,7 +395,7 @@ abstract contract GasRelayBase is GasRelayHelper {
                 owner: _sessionKey.owner,
                 key: caller,
                 expiration: _sessionKey.expiration,
-                startingGasLeft: gasleft() + _BASE_TX_GAS_USAGE + (msg.data.length * _NONZERO_CALLDATA_CHAR_COST),
+                startingGasLeft: startingGas,
                 credits: 0
             });
             _storeUnderlyingMsgSender(CallerType.SessionKey);
@@ -414,16 +419,15 @@ abstract contract GasRelayBase is GasRelayHelper {
         // We pay the full gas limit regardless of usage since execution is asynchronous
         uint256 _sharesNeeded = 0;
 
+        address _payee = gasAbstractionTracker.usingSessionKey ? gasAbstractionTracker.key : gasAbstractionTracker.owner;
         if (gasAbstractionTracker.usingSessionKey) {
-            uint256 _maxExpectedGasUsage = _MAX_EXPECTED_GAS_USAGE_PER_TX();
-            uint256 _replacementGas = gasAbstractionTracker.startingGasLeft > _maxExpectedGasUsage
-                ? _maxExpectedGasUsage
-                : gasAbstractionTracker.startingGasLeft;
-            uint256 _replacementAmount = _replacementGas * tx.gasprice;
+            uint256 _replacementAmount = gasAbstractionTracker.startingGasLeft * tx.gasprice;
             uint256 _deficitAmount = _sessionKeyBalanceDeficit(gasAbstractionTracker.key);
 
             if (_deficitAmount == 0) {
-                _sharesNeeded = 0;
+                // decrease the refill amount
+                _sharesNeeded =
+                    _convertMonToWithdrawnShMon(_replacementAmount * _BASE_FEE_DENOMINATOR / _BASE_FEE_MAX_INCREASE);
             } else if (_deficitAmount > _replacementAmount * _BASE_FEE_MAX_INCREASE / _BASE_FEE_DENOMINATOR) {
                 // TODO: This needs more bespoke handling of base fee increases - will update once
                 // Monad TX fee mechanism is published.
@@ -434,45 +438,41 @@ abstract contract GasRelayBase is GasRelayHelper {
             }
         }
 
-        // Handle reimbursement scenarios based on available credits
-        if (_credits >= _sharesNeeded) {
-            // When credits are sufficient, refill the session key
-            if (_sharesNeeded > 0) {
-                // TODO: This will need to be updated to use the ClearingHouse's atomic unstaking function
-                IShMonad(SHMONAD).redeem(_sharesNeeded, gasAbstractionTracker.key, address(this));
-                _credits -= _sharesNeeded;
-                _sharesNeeded = 0;
-            }
-        } else if (_sharesNeeded > _credits) {
-            // When credits only cover part of the needed shares
-            if (_credits > 0) {
-                // TODO: This will need to be updated to use the ClearingHouse's atomic unstaking function
-                IShMonad(SHMONAD).redeem(_credits, gasAbstractionTracker.key, address(this));
-                _sharesNeeded -= _credits;
-                _credits = 0;
-            }
+        // Exit early if credits exactly matched needed shares
+        if (_credits == 0 && _sharesNeeded == 0) {
+            return;
         }
 
-        // Exit early if credits exactly matched needed shares
-        if (_credits == _sharesNeeded) {
-            return;
-        } else if (_credits > _sharesNeeded) {
+        if (_credits > _sharesNeeded) {
             // Return excess credits to owner
             // NOTE: _sharesNeeded should be zero
-            _creditToOwnerAndBond(gasAbstractionTracker.owner, _credits);
+            IShMonad(SHMONAD).redeem(_sharesNeeded, _payee, address(this));
+            _creditToOwnerAndBond(gasAbstractionTracker.owner, _credits - _sharesNeeded);
         } else {
-            uint256 _sharesAvailable = _sharesBondedToThis(gasAbstractionTracker.owner);
-            uint256 _minSharesRemaining = _minBondedShares(gasAbstractionTracker.owner);
-            if (_sharesAvailable > _minSharesRemaining) {
-                _sharesAvailable -= _minSharesRemaining;
+            if (_credits > 0) {
+                // TODO: This will need to be updated to use the ClearingHouse's atomic unstaking function
+                IShMonad(SHMONAD).redeem(_credits, _payee, address(this));
+                _sharesNeeded -= _credits;
+            }
+
+            if (_sharesNeeded > 0) {
+                uint256 _sharesAvailable = _sharesBondedToThis(gasAbstractionTracker.owner);
+                uint256 _minSharesRemaining = _minBondedShares(gasAbstractionTracker.owner);
+                if (_sharesAvailable > _minSharesRemaining) {
+                    _sharesAvailable -= _minSharesRemaining;
+                } else {
+                    _sharesAvailable = 0;
+                }
 
                 if (_sharesNeeded > _sharesAvailable) {
                     _sharesNeeded = _sharesAvailable;
                 }
 
-                IShMonad(SHMONAD).agentWithdrawFromBonded(
-                    POLICY_ID(), gasAbstractionTracker.owner, gasAbstractionTracker.key, _sharesNeeded, 0, false
-                );
+                if (_sharesNeeded > 0) {
+                    IShMonad(SHMONAD).agentWithdrawFromBonded(
+                        POLICY_ID(), gasAbstractionTracker.owner, gasAbstractionTracker.key, _sharesNeeded, 0, false
+                    );
+                }
             }
         }
     }
