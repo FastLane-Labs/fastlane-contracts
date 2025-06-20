@@ -418,23 +418,20 @@ abstract contract GasRelayBase is GasRelayHelper {
 
         // We pay the full gas limit regardless of usage since execution is asynchronous
         uint256 _sharesNeeded = 0;
-
         address _payee = gasAbstractionTracker.usingSessionKey ? gasAbstractionTracker.key : gasAbstractionTracker.owner;
+
         if (gasAbstractionTracker.usingSessionKey) {
             uint256 _replacementAmount = gasAbstractionTracker.startingGasLeft * tx.gasprice;
             uint256 _deficitAmount = _sessionKeyBalanceDeficit(gasAbstractionTracker.key);
 
-            if (_deficitAmount == 0) {
-                // decrease the refill amount
-                _sharesNeeded =
-                    _convertMonToWithdrawnShMon(_replacementAmount * _BASE_FEE_DENOMINATOR / _BASE_FEE_MAX_INCREASE);
-            } else if (_deficitAmount > _replacementAmount * _BASE_FEE_MAX_INCREASE / _BASE_FEE_DENOMINATOR) {
+            if (_deficitAmount > _replacementAmount) {
                 // TODO: This needs more bespoke handling of base fee increases - will update once
                 // Monad TX fee mechanism is published.
                 _sharesNeeded =
                     _convertMonToWithdrawnShMon(_replacementAmount * _BASE_FEE_MAX_INCREASE / _BASE_FEE_DENOMINATOR);
             } else {
-                _sharesNeeded = _convertMonToWithdrawnShMon(_deficitAmount);
+                _sharesNeeded =
+                    _convertMonToWithdrawnShMon(_replacementAmount * _BASE_FEE_DENOMINATOR / _BASE_FEE_MAX_INCREASE);
             }
         }
 
