@@ -156,13 +156,9 @@ abstract contract GasRelayBase is GasRelayHelper {
     /// @notice Modifier that enables gas abstraction through session keys
     /// @dev Handles the complete gas abstraction flow including reimbursement and task execution
     modifier GasAbstracted() {
-        uint256 _startingGas = gasleft() + _BASE_TX_GAS_USAGE + (msg.data.length * _NONZERO_CALLDATA_CHAR_COST);
-
-        _checkForReentrancy();
-        // NOTE: Locking is handled inside the _startShMonadGasAbstraction method.
-
         // Initialize gas abstraction tracking and identify session key
-        GasAbstractionTracker memory gasAbstractionTracker = _startShMonadGasAbstraction(msg.sender, _startingGas);
+        // NOTE: Locking and reentrancy checks are handled inside the _startShMonadGasAbstraction method.
+        GasAbstractionTracker memory gasAbstractionTracker = _startShMonadGasAbstraction();
 
         // Execute the intended function
         _;
@@ -349,17 +345,15 @@ abstract contract GasRelayBase is GasRelayHelper {
 
     /// @notice Initializes gas abstraction for a transaction
     /// @dev Sets up tracking and context for gas abstraction handling
-    /// @param caller Address initiating the transaction
     /// @return gasAbstractionTracker Initial gas tracking state
-    function _startShMonadGasAbstraction(
-        address caller,
-        uint256 startingGas
-    )
-        internal
-        returns (GasAbstractionTracker memory gasAbstractionTracker)
-    {
+    function _startShMonadGasAbstraction() internal returns (GasAbstractionTracker memory gasAbstractionTracker) {
+        uint256 _startingGas = gasleft() + _BASE_TX_GAS_USAGE + (msg.data.length * _NONZERO_CALLDATA_CHAR_COST);
+
+        // Reentrancy check
+        _checkForReentrancy();
+
         // NOTE: Assumes msg.sender is session key
-        SessionKey memory _sessionKey = _loadSessionKey(caller);
+        SessionKey memory _sessionKey = _loadSessionKey(msg.sender);
 
         // CASE: SessionKey is expired or invalid
         if (_sessionKey.owner == address(0) || uint64(block.number) >= _sessionKey.expiration) {
@@ -368,10 +362,10 @@ abstract contract GasRelayBase is GasRelayHelper {
             }
             gasAbstractionTracker = GasAbstractionTracker({
                 usingSessionKey: false,
-                owner: caller, // Beneficiary of any task execution credits
+                owner: msg.sender, // Beneficiary of any task execution credits
                 key: address(0),
                 expiration: 0,
-                startingGasLeft: startingGas,
+                startingGasLeft: _startingGas,
                 credits: 0
             });
             _storeUnderlyingMsgSender(CallerType.Owner);
@@ -383,7 +377,7 @@ abstract contract GasRelayBase is GasRelayHelper {
                 owner: _sessionKey.owner,
                 key: address(0),
                 expiration: _sessionKey.expiration,
-                startingGasLeft: startingGas,
+                startingGasLeft: _startingGas,
                 credits: 0
             });
             _storeUnderlyingMsgSender(CallerType.Task);
@@ -393,9 +387,9 @@ abstract contract GasRelayBase is GasRelayHelper {
             gasAbstractionTracker = GasAbstractionTracker({
                 usingSessionKey: true,
                 owner: _sessionKey.owner,
-                key: caller,
+                key: msg.sender,
                 expiration: _sessionKey.expiration,
-                startingGasLeft: startingGas,
+                startingGasLeft: _startingGas,
                 credits: 0
             });
             _storeUnderlyingMsgSender(CallerType.SessionKey);
