@@ -1,7 +1,10 @@
 {
     "name": "@fastlane-labs/fastlane-contracts",
     "version": "0.0.8",
-    "repository": "https://github.com/FastLane-Labs/fastlane-contracts",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/FastLane-Labs/fastlane-contracts.git"
+    },
     "author": "FastLane",
     "publishConfig": {
         "access": "public"
