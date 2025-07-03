@@ -1,6 +1,6 @@
 {
     "name": "@fastlane-labs/fastlane-contracts",
-    "version": "0.0.6",
+    "version": "0.0.7",
     "repository": "https://github.com/FastLane-Labs/fastlane-contracts",
     "author": "FastLane",
     "publishConfig": {
