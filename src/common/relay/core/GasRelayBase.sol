@@ -150,7 +150,7 @@ abstract contract GasRelayBase is GasRelayHelper {
         _finishCreatingOrUpdatingSessionKey(owner);
 
         // Clean up the transaction context
-        _unlock(false);
+        _unlock({ preserveUnderlyingCaller: false });
     }
 
     /// @notice Modifier that enables gas abstraction through session keys
@@ -164,7 +164,7 @@ abstract contract GasRelayBase is GasRelayHelper {
         _;
 
         // Process unused gas through task manager if possible
-        if (!_isTask()) {
+        if (!gasAbstractionTracker.isTask) {
             gasAbstractionTracker = _handleUnusedGas(gasAbstractionTracker, _MIN_REMAINDER_GAS_BUFFER);
 
             // Handle gas reimbursement for the transaction
@@ -172,7 +172,7 @@ abstract contract GasRelayBase is GasRelayHelper {
         }
 
         // Clean up the transaction context
-        _unlock(false);
+        _unlock({ preserveUnderlyingCaller: false });
     }
 
     /// @notice Modifier providing reentrancy protection using transient storage
@@ -362,6 +362,7 @@ abstract contract GasRelayBase is GasRelayHelper {
             }
             gasAbstractionTracker = GasAbstractionTracker({
                 usingSessionKey: false,
+                isTask: false,
                 owner: msg.sender, // Beneficiary of any task execution credits
                 key: address(0),
                 expiration: 0,
@@ -373,9 +374,10 @@ abstract contract GasRelayBase is GasRelayHelper {
             // CASE: SessionKey is a task
         } else if (_sessionKey.isTask) {
             gasAbstractionTracker = GasAbstractionTracker({
-                usingSessionKey: false,
+                usingSessionKey: true,
+                isTask: true,
                 owner: _sessionKey.owner,
-                key: address(0),
+                key: msg.sender,
                 expiration: _sessionKey.expiration,
                 startingGasLeft: _startingGas,
                 credits: 0
@@ -386,6 +388,7 @@ abstract contract GasRelayBase is GasRelayHelper {
         } else {
             gasAbstractionTracker = GasAbstractionTracker({
                 usingSessionKey: true,
+                isTask: false,
                 owner: _sessionKey.owner,
                 key: msg.sender,
                 expiration: _sessionKey.expiration,
@@ -414,7 +417,7 @@ abstract contract GasRelayBase is GasRelayHelper {
         uint256 _sharesNeeded = 0;
         address _payee = gasAbstractionTracker.usingSessionKey ? gasAbstractionTracker.key : gasAbstractionTracker.owner;
 
-        if (gasAbstractionTracker.usingSessionKey) {
+        if (gasAbstractionTracker.usingSessionKey && !gasAbstractionTracker.isTask) {
             uint256 _replacementAmount = gasAbstractionTracker.startingGasLeft * tx.gasprice;
             uint256 _deficitAmount = _sessionKeyBalanceDeficit(gasAbstractionTracker.key);
 
@@ -430,6 +433,7 @@ abstract contract GasRelayBase is GasRelayHelper {
         }
 
         // Exit early if credits exactly matched needed shares
+        // NOTE: This will catch tasks too
         if (_credits == 0 && _sharesNeeded == 0) {
             return;
         }
@@ -437,8 +441,11 @@ abstract contract GasRelayBase is GasRelayHelper {
         if (_credits > _sharesNeeded) {
             // Return excess credits to owner
             // NOTE: _sharesNeeded should be zero
-            IShMonad(SHMONAD).redeem(_sharesNeeded, _payee, address(this));
-            _creditToOwnerAndBond(gasAbstractionTracker.owner, _credits - _sharesNeeded);
+            if (_sharesNeeded > 0) {
+                IShMonad(SHMONAD).redeem(_sharesNeeded, _payee, address(this));
+                _credits -= _sharesNeeded;
+            }
+            _creditToOwnerAndBond(gasAbstractionTracker.owner, _credits);
         } else {
             if (_credits > 0) {
                 // TODO: This will need to be updated to use the ClearingHouse's atomic unstaking function

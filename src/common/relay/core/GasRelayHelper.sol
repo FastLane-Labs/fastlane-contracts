@@ -82,7 +82,7 @@ abstract contract GasRelayHelper is GasRelayConstants {
         _gasRate = _gasRate * _BASE_FEE_MAX_INCREASE / _BASE_FEE_DENOMINATOR;
         // Use direct multiplication instead of bit shifting
         (uint256 _maxExpectedGasUsage, uint256 _targetBalanceMultipler) = _GAS_USAGE_AND_MULTIPLIER();
-        targetBalance = (_maxExpectedGasUsage * _gasRate) * _targetBalanceMultipler;
+        targetBalance = _maxExpectedGasUsage * _gasRate * _targetBalanceMultipler;
     }
 
     /// @notice Check if the contract is currently in use (reentrancy check)

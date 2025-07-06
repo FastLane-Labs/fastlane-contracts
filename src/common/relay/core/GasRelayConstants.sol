@@ -81,6 +81,7 @@ abstract contract GasRelayConstants is GasRelayErrors {
 
     /// @notice Transient storage bit for identifying tasks
     /// @dev Bit mask used to mark storage as a task
+    // 1<<163
     bytes32 internal constant _IS_TASK_BIT = 0x0000000000000000000000080000000000000000000000000000000000000000;
 
     /// @notice Combined bits for session key in use
