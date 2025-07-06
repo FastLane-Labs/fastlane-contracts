@@ -47,6 +47,8 @@ struct SessionKeyData {
 struct GasAbstractionTracker {
     /// @notice Whether a session key is being used for this transaction
     bool usingSessionKey;
+    /// @notice Whether a task is being used as a session key
+    bool isTask;
     /// @notice Address of the owner (original sender)
     address owner;
     /// @notice Address of the session key
