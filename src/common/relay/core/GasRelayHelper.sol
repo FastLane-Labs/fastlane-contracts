@@ -179,17 +179,17 @@ abstract contract GasRelayHelper is GasRelayConstants {
         // default owner, which results in the same UX. The exception is if it's a task.
         if (address(msg.sender).code.length != 0 && callerType != CallerType.Task) return;
 
-        bytes32 _packedUnderlyingCaller;
+        bytes32 _packedUnderlyingCaller = bytes32(uint256(uint160(address(msg.sender)))) | _IN_USE_BIT;
 
-        if (callerType == CallerType.Owner) {
-            _packedUnderlyingCaller = bytes32(uint256(uint160(address(msg.sender)))) | _IN_USE_BIT;
-        } else if (callerType == CallerType.SessionKey) {
-            _packedUnderlyingCaller = bytes32(uint256(uint160(address(msg.sender)))) | _IN_USE_AS_SESSION_KEY_BITS;
-        } else if (callerType == CallerType.Task) {
-            _packedUnderlyingCaller = bytes32(uint256(uint160(address(msg.sender)))) | _IN_USE_AS_TASK_BITS;
-        } else {
-            revert UnknownMsgSenderType();
+        // NOTE: This treats tasks as session keys!
+        if (callerType != CallerType.Owner) {
+            _packedUnderlyingCaller |= _IS_SESSION_KEY_BIT;
         }
+
+        if (callerType == CallerType.Task) {
+            _packedUnderlyingCaller |= _IS_TASK_BIT;
+        }
+
         bytes32 _underlyingCallerTransientSlot = _UNDERLYING_CALLER_NAMESPACE();
         assembly {
             tstore(_underlyingCallerTransientSlot, _packedUnderlyingCaller)
@@ -305,19 +305,17 @@ abstract contract GasRelayHelper is GasRelayConstants {
     /// @return sessionKey Session key data
     function _loadSessionKey(address sessionKeyAddress) internal view returns (SessionKey memory sessionKey) {
         bytes32 _sessionKeyStorageSlot = keccak256(abi.encodePacked(sessionKeyAddress, _SESSION_KEY_NAMESPACE()));
-        address _owner;
-        uint256 _expiration;
-        bool _isTask;
+        bytes32 _packedSessionKey;
         assembly {
-            let _packedSessionKey := sload(_sessionKeyStorageSlot)
-            _owner := and(_packedSessionKey, 0x000000000000000000000000ffffffffffffffffffffffffffffffffffffffff)
-            _expiration :=
-                and(shr(192, _packedSessionKey), 0x000000000000000000000000000000000000000000000000ffffffffffffffff)
-            _isTask := gt(and(_packedSessionKey, _IS_TASK_BIT), 0)
+            _packedSessionKey := sload(_sessionKeyStorageSlot)
         }
-        sessionKey.owner = _owner;
-        sessionKey.expiration = uint64(_expiration);
-        sessionKey.isTask = _isTask;
+        sessionKey.owner = address(
+            uint160(uint256(_packedSessionKey & 0x000000000000000000000000ffffffffffffffffffffffffffffffffffffffff))
+        );
+        sessionKey.expiration = uint64(
+            uint256(_packedSessionKey >> 192) & 0x000000000000000000000000000000000000000000000000ffffffffffffffff
+        );
+        sessionKey.isTask = _packedSessionKey & _IS_TASK_BIT != 0;
     }
 
     /// @notice Load session key from owner address
