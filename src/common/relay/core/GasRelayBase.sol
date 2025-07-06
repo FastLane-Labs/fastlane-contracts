@@ -457,19 +457,26 @@ abstract contract GasRelayBase is GasRelayHelper {
             if (_sharesNeeded > 0) {
                 uint256 _sharesAvailable = _sharesBondedToThis(gasAbstractionTracker.owner);
                 uint256 _minSharesRemaining = _minBondedShares(gasAbstractionTracker.owner);
+
+                if (_sharesNeeded + _minSharesRemaining > _sharesAvailable) {
+                    uint256 _topUpAvailable =
+                        IShMonad(SHMONAD).topUpAvailable(POLICY_ID(), gasAbstractionTracker.owner, false);
+                    _sharesAvailable += _topUpAvailable;
+                }
+
                 if (_sharesAvailable > _minSharesRemaining) {
                     _sharesAvailable -= _minSharesRemaining;
                 } else {
                     _sharesAvailable = 0;
                 }
 
-                if (_sharesNeeded > _sharesAvailable) {
-                    _sharesNeeded = _sharesAvailable;
-                }
-
-                if (_sharesNeeded > 0) {
+                if (_sharesAvailable >= _sharesNeeded) {
                     IShMonad(SHMONAD).agentWithdrawFromBonded(
                         POLICY_ID(), gasAbstractionTracker.owner, gasAbstractionTracker.key, _sharesNeeded, 0, false
+                    );
+                } else if (_sharesAvailable > 0) {
+                    IShMonad(SHMONAD).agentWithdrawFromBonded(
+                        POLICY_ID(), gasAbstractionTracker.owner, gasAbstractionTracker.key, _sharesAvailable, 0, false
                     );
                 }
             }
