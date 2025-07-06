@@ -418,7 +418,8 @@ abstract contract GasRelayBase is GasRelayHelper {
         address _payee = gasAbstractionTracker.usingSessionKey ? gasAbstractionTracker.key : gasAbstractionTracker.owner;
 
         if (gasAbstractionTracker.usingSessionKey && !gasAbstractionTracker.isTask) {
-            uint256 _replacementAmount = gasAbstractionTracker.startingGasLeft * tx.gasprice;
+            uint256 _gasPrice = tx.gasprice > block.basefee ? tx.gasprice : block.basefee;
+            uint256 _replacementAmount = gasAbstractionTracker.startingGasLeft * _gasPrice;
             uint256 _deficitAmount = _sessionKeyBalanceDeficit(gasAbstractionTracker.key);
 
             if (_deficitAmount > _replacementAmount) {
