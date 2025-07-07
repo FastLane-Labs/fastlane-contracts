@@ -177,8 +177,8 @@ contract GeneralReschedulingTask {
         }
         bytes32 _calldataHash = keccak256(data);
 
-        _storeTarget(target);
-        _storeCaller(msg.sender);
+        _storeTaskTarget(target);
+        _storeTaskCaller(msg.sender);
         _storeCalldataHash(_calldataHash);
     }
 
@@ -192,8 +192,8 @@ contract GeneralReschedulingTask {
             revert CantBeDelegated();
         }
 
-        target = _loadTarget();
-        task = _loadCaller();
+        target = _loadTaskTarget();
+        task = _loadTaskCaller();
         calldataHash = _loadCalldataHash();
     }
 
@@ -208,7 +208,7 @@ contract GeneralReschedulingTask {
         }
         bytes32 _expectedCalldataHash = keccak256(data);
         bytes32 _actualCalldataHash = _loadCalldataHash();
-        validMatch = _expectedCalldataHash == _actualCalldataHash && target == _loadTarget();
+        validMatch = _expectedCalldataHash == _actualCalldataHash && target == _loadTaskTarget();
     }
 
     /// @notice Sets rescheduling parameters for a task
@@ -298,8 +298,8 @@ contract GeneralReschedulingTask {
 
         (maxCost, targetBlock, reschedule) = _loadRescheduleData();
 
-        _storeTarget(address(0));
-        _storeCaller(address(0));
+        _storeTaskTarget(address(0));
+        _storeTaskCaller(address(0));
         _storeCalldataHash(bytes32(0));
         _storeRescheduleData(0, 0, false);
     }
@@ -312,8 +312,8 @@ contract GeneralReschedulingTask {
         }
         _targetSenderCheck();
 
-        _storeTarget(address(0));
-        _storeCaller(address(0));
+        _storeTaskTarget(address(0));
+        _storeTaskCaller(address(0));
         _storeCalldataHash(bytes32(0));
         _storeRescheduleData(0, 0, false);
     }
@@ -321,25 +321,25 @@ contract GeneralReschedulingTask {
     // NOTE: If you override this, be sure to also override GENERAL_TASK_IMPL()
     // in the relay
     function _targetSenderCheck() internal view virtual {
-        if (msg.sender != _loadTarget()) {
+        if (msg.sender != _loadTaskTarget()) {
             revert OnlyTargetCanSetReschedule();
         }
     }
 
     function _targetInputCheck(address target) internal view virtual {
-        if (target != _loadTarget()) {
+        if (target != _loadTaskTarget()) {
             revert OnlyTargetCanSetReschedule();
         }
     }
 
     function _callerSenderCheck() internal view virtual {
-        if (msg.sender != _loadCaller()) {
+        if (msg.sender != _loadTaskCaller()) {
             revert CallerMustBeActiveTask();
         }
     }
 
     function _callerInputCheck(address task) internal view virtual {
-        if (task != _loadCaller()) {
+        if (task != _loadTaskCaller()) {
             revert CallerMustBeActiveTask();
         }
     }
@@ -352,7 +352,7 @@ contract GeneralReschedulingTask {
 
     /// @notice Stores target address in transient storage
     /// @param target Address to store
-    function _storeTarget(address target) private {
+    function _storeTaskTarget(address target) private {
         bytes32 _targetTransientSlot = _TARGET_NAMESPACE;
         assembly {
             tstore(_targetTransientSlot, target)
@@ -361,7 +361,7 @@ contract GeneralReschedulingTask {
 
     /// @notice Loads target address from transient storage
     /// @return target Stored target address
-    function _loadTarget() private view returns (address target) {
+    function _loadTaskTarget() internal view returns (address target) {
         bytes32 _targetTransientSlot = _TARGET_NAMESPACE;
         assembly {
             target := tload(_targetTransientSlot)
@@ -388,7 +388,7 @@ contract GeneralReschedulingTask {
 
     /// @notice Stores caller address in transient storage
     /// @param expectedCaller Address to store
-    function _storeCaller(address expectedCaller) private {
+    function _storeTaskCaller(address expectedCaller) private {
         bytes32 _callerTransientSlot = _CALLER_NAMESPACE;
         assembly {
             tstore(_callerTransientSlot, expectedCaller)
@@ -397,7 +397,7 @@ contract GeneralReschedulingTask {
 
     /// @notice Loads caller address from transient storage
     /// @return expectedCaller Stored caller address
-    function _loadCaller() private view returns (address expectedCaller) {
+    function _loadTaskCaller() internal view returns (address expectedCaller) {
         bytes32 _callerTransientSlot = _CALLER_NAMESPACE;
         assembly {
             expectedCaller := tload(_callerTransientSlot)
