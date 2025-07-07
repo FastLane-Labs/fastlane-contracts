@@ -16,7 +16,7 @@ interface IGeneralReschedulingTask {
     /// @notice Marks a target for task execution and stores its data
     /// @param target Address of the target contract
     /// @param data Calldata to be executed
-    function markTarget(address target, bytes calldata data) external;
+    function markTarget(address target, bytes memory data) external;
 
     /// @notice Retrieves the stored target, task, and calldata hash
     /// @return target Address of the target contract
@@ -28,7 +28,7 @@ interface IGeneralReschedulingTask {
     /// @param target Address to validate against stored target
     /// @param data Calldata to validate against stored hash
     /// @return validMatch True if target and data match stored values
-    function matchCalldataHash(address target, bytes calldata data) external view returns (bool validMatch);
+    function matchCalldataHash(address target, bytes memory data) external view returns (bool validMatch);
 
     /// @notice Sets rescheduling parameters for a task
     /// @param task Address of the task to reschedule
@@ -47,7 +47,7 @@ interface IGeneralReschedulingTask {
     /// @return valid True if data was set successfully
     function setRescheduleDataIfMatch(
         address target,
-        bytes calldata data,
+        bytes memory data,
         address task,
         uint256 maxCost,
         uint256 targetBlock,

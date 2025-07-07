@@ -168,7 +168,7 @@ contract GeneralReschedulingTask {
     /// @dev Must be called directly on implementation by active task
     /// @param target Address of the target contract
     /// @param data Calldata to be executed
-    function markTarget(address target, bytes calldata data) public {
+    function markTarget(address target, bytes memory data) public {
         if (address(this) != _IMPLEMENTATION) {
             revert CantBeDelegated();
         }
@@ -202,7 +202,7 @@ contract GeneralReschedulingTask {
     /// @param target Address to validate against stored target
     /// @param data Calldata to validate against stored hash
     /// @return validMatch True if target and data match stored values
-    function matchCalldataHash(address target, bytes calldata data) public view returns (bool validMatch) {
+    function matchCalldataHash(address target, bytes memory data) public view returns (bool validMatch) {
         if (address(this) != _IMPLEMENTATION) {
             revert CantBeDelegated();
         }
@@ -242,7 +242,7 @@ contract GeneralReschedulingTask {
     /// @return valid True if data was set successfully
     function setRescheduleDataIfMatch(
         address target,
-        bytes calldata data,
+        bytes memory data,
         address task,
         uint256 maxCost,
         uint256 targetBlock,
