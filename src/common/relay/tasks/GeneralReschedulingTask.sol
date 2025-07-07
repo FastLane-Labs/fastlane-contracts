@@ -221,12 +221,9 @@ contract GeneralReschedulingTask {
         if (address(this) != _IMPLEMENTATION) {
             revert CantBeDelegated();
         }
-        if (msg.sender != _loadTarget()) {
-            revert OnlyTargetCanSetReschedule();
-        }
-        if (task != _loadCaller()) {
-            revert InvalidTaskMatch(task, _loadCaller());
-        }
+
+        _targetSenderCheck();
+        _callerInputCheck(task);
 
         _storeRescheduleData(maxCost, targetBlock, reschedule);
     }
@@ -254,12 +251,8 @@ contract GeneralReschedulingTask {
         if (address(this) != _IMPLEMENTATION) {
             revert CantBeDelegated();
         }
-        if (msg.sender != _loadTarget()) {
-            revert OnlyTargetCanSetReschedule();
-        }
-        if (task != _loadCaller()) {
-            revert InvalidTaskMatch(task, _loadCaller());
-        }
+        _targetSenderCheck();
+        _callerInputCheck(task);
 
         if (matchCalldataHash(target, data)) {
             _storeRescheduleData(maxCost, targetBlock, reschedule);
@@ -281,12 +274,8 @@ contract GeneralReschedulingTask {
         if (address(this) != _IMPLEMENTATION) {
             revert CantBeDelegated();
         }
-        if (msg.sender != _loadCaller()) {
-            revert CallerMustBeActiveTask();
-        }
-        if (target != _loadTarget()) {
-            revert OnlyTargetCanSetReschedule();
-        }
+        _callerSenderCheck();
+        _targetInputCheck(target);
 
         (maxCost, targetBlock, reschedule) = _loadRescheduleData();
     }
@@ -304,12 +293,8 @@ contract GeneralReschedulingTask {
         if (address(this) != _IMPLEMENTATION) {
             revert CantBeDelegated();
         }
-        if (msg.sender != _loadCaller()) {
-            revert CallerMustBeActiveTask();
-        }
-        if (target != _loadTarget()) {
-            revert OnlyTargetCanSetReschedule();
-        }
+        _callerSenderCheck();
+        _targetInputCheck(target);
 
         (maxCost, targetBlock, reschedule) = _loadRescheduleData();
 
@@ -325,14 +310,38 @@ contract GeneralReschedulingTask {
         if (address(this) != _IMPLEMENTATION) {
             revert CantBeDelegated();
         }
-        if (msg.sender != _loadCaller() && msg.sender != _loadTarget()) {
-            revert CallerMustBeActiveTaskOrTarget();
-        }
+        _targetSenderCheck();
 
         _storeTarget(address(0));
         _storeCaller(address(0));
         _storeCalldataHash(bytes32(0));
         _storeRescheduleData(0, 0, false);
+    }
+
+    // NOTE: If you override this, be sure to also override GENERAL_TASK_IMPL()
+    // in the relay
+    function _targetSenderCheck() internal view virtual {
+        if (msg.sender != _loadTarget()) {
+            revert OnlyTargetCanSetReschedule();
+        }
+    }
+
+    function _targetInputCheck(address target) internal view virtual {
+        if (target != _loadTarget()) {
+            revert OnlyTargetCanSetReschedule();
+        }
+    }
+
+    function _callerSenderCheck() internal view virtual {
+        if (msg.sender != _loadCaller()) {
+            revert CallerMustBeActiveTask();
+        }
+    }
+
+    function _callerInputCheck(address task) internal view virtual {
+        if (task != _loadCaller()) {
+            revert CallerMustBeActiveTask();
+        }
     }
 
     /// @notice Gets the currently active task from the task manager
