@@ -59,6 +59,10 @@ abstract contract GasRelayConstants is GasRelayErrors {
     /// @dev Used to calculate maximum allowed base fee increases
     uint256 internal constant _BASE_FEE_MAX_INCREASE = 1125;
 
+    /// @notice Maximum base fee decrease factor (87.5%)
+    /// @dev Used to calculate maximum allowed base fee decreases
+    uint256 internal constant _BASE_FEE_MAX_DECREASE = 875;
+
     /// @notice Denominator for base fee calculations
     /// @dev Used in conjunction with _BASE_FEE_MAX_INCREASE for percentage calculations
     uint256 internal constant _BASE_FEE_DENOMINATOR = 1000;

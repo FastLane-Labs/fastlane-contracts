@@ -163,16 +163,16 @@ abstract contract GasRelayBase is GasRelayHelper {
         // Execute the intended function
         _;
 
+        // Clean up the transaction context
+        _unlock({ preserveUnderlyingCaller: false });
+
         // Process unused gas through task manager if possible
         if (!gasAbstractionTracker.isTask) {
             gasAbstractionTracker = _handleUnusedGas(gasAbstractionTracker, _MIN_REMAINDER_GAS_BUFFER);
-
-            // Handle gas reimbursement for the transaction
-            _finishShMonadGasAbstraction(gasAbstractionTracker);
         }
 
-        // Clean up the transaction context
-        _unlock({ preserveUnderlyingCaller: false });
+        // Handle gas reimbursement for the transaction
+        _finishShMonadGasAbstraction(gasAbstractionTracker);
     }
 
     /// @notice Modifier providing reentrancy protection using transient storage
@@ -347,7 +347,13 @@ abstract contract GasRelayBase is GasRelayHelper {
     /// @dev Sets up tracking and context for gas abstraction handling
     /// @return gasAbstractionTracker Initial gas tracking state
     function _startShMonadGasAbstraction() internal returns (GasAbstractionTracker memory gasAbstractionTracker) {
-        uint256 _startingGas = gasleft() + _BASE_TX_GAS_USAGE + (msg.data.length * _NONZERO_CALLDATA_CHAR_COST);
+        uint256 _startingGas = gasleft();
+        if (_startingGas > _MAX_EXPECTED_GAS_USAGE_PER_TX()) {
+            _startingGas = _MAX_EXPECTED_GAS_USAGE_PER_TX();
+        } else {
+            _startingGas += _BASE_TX_GAS_USAGE;
+        }
+        _startingGas += (msg.data.length * _NONZERO_CALLDATA_CHAR_COST);
 
         // Reentrancy check
         _checkForReentrancy();
@@ -420,16 +426,26 @@ abstract contract GasRelayBase is GasRelayHelper {
         if (gasAbstractionTracker.usingSessionKey && !gasAbstractionTracker.isTask) {
             uint256 _gasPrice = tx.gasprice > block.basefee ? tx.gasprice : block.basefee;
             uint256 _replacementAmount = gasAbstractionTracker.startingGasLeft * _gasPrice;
-            uint256 _deficitAmount = _sessionKeyBalanceDeficit(gasAbstractionTracker.key);
 
-            if (_deficitAmount > _replacementAmount) {
-                // TODO: This needs more bespoke handling of base fee increases - will update once
-                // Monad TX fee mechanism is published.
+            (uint256 _maxExpectedGasUsage, uint256 _targetBalanceMultipler) = _GAS_USAGE_AND_MULTIPLIER();
+            uint256 _targetBalanceInGas = _maxExpectedGasUsage * _targetBalanceMultipler;
+            uint256 _targetBalance = _targetBalanceInGas * _gasPrice;
+            uint256 _actualBalance = address(gasAbstractionTracker.key).balance;
+
+            if (_targetBalance < _actualBalance) {
+                _sharesNeeded = _convertMonToWithdrawnShMon(_replacementAmount / _targetBalanceMultipler);
+            } else if (_targetBalance < _actualBalance + _replacementAmount) {
                 _sharesNeeded =
-                    _convertMonToWithdrawnShMon(_replacementAmount * _BASE_FEE_MAX_INCREASE / _BASE_FEE_DENOMINATOR);
+                    _convertMonToWithdrawnShMon(_replacementAmount * _BASE_FEE_MAX_DECREASE / _BASE_FEE_DENOMINATOR);
+            } else if (_targetBalanceInGas * block.basefee < _actualBalance + _replacementAmount) {
+                _sharesNeeded = _convertMonToWithdrawnShMon(_replacementAmount);
             } else {
-                _sharesNeeded =
-                    _convertMonToWithdrawnShMon(_replacementAmount * _BASE_FEE_DENOMINATOR / _BASE_FEE_MAX_INCREASE);
+                // CASE: _targetBalance > _actualBalance + _replacementAmount.
+                uint256 _deficitWithPriority = _targetBalance - _actualBalance;
+                _sharesNeeded = _convertMonToWithdrawnShMon(
+                    ((_replacementAmount * _targetBalanceMultipler) + _deficitWithPriority)
+                        / (_targetBalanceMultipler + 1)
+                );
             }
         }
 
