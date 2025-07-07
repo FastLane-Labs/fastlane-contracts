@@ -488,11 +488,11 @@ abstract contract GasRelayBase is GasRelayHelper {
 
                 if (_sharesAvailable >= _sharesNeeded) {
                     IShMonad(SHMONAD).agentWithdrawFromBonded(
-                        POLICY_ID(), gasAbstractionTracker.owner, gasAbstractionTracker.key, _sharesNeeded, 0, false
+                        POLICY_ID(), gasAbstractionTracker.owner, _payee, _sharesNeeded, 0, false
                     );
                 } else if (_sharesAvailable > 0) {
                     IShMonad(SHMONAD).agentWithdrawFromBonded(
-                        POLICY_ID(), gasAbstractionTracker.owner, gasAbstractionTracker.key, _sharesAvailable, 0, false
+                        POLICY_ID(), gasAbstractionTracker.owner, _payee, _sharesAvailable, 0, false
                     );
                 }
             }
