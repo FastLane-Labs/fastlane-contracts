@@ -103,7 +103,8 @@ abstract contract TaskPricing is TaskLoadBalancer {
         executionQuote = Math.mulDiv(executionQuote, _CONGESTION_GROWTH_RATE, _BASE_RATE, Math.Rounding.Ceil);
 
         // Add the forecast modifier with ceiling rounding
-        uint256 _forecastModifier = (trackers.blockNumber - block.number) / _GROUP_SIZE;
+        uint256 _forecastModifier =
+            trackers.blockNumber > block.number ? (trackers.blockNumber - block.number) / _GROUP_SIZE : 0;
         uint256 forecastRate = Math.mulDiv(
             _BASE_RATE + (_FORECAST_GROWTH_RATE * _forecastModifier), _BASE_RATE, _BASE_RATE, Math.Rounding.Ceil
         );

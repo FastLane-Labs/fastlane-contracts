@@ -64,9 +64,9 @@ contract SetupAtlas is Test {
 
     uint64 atlasPolicyID;
 
-    function __setUpAtlas(address deployer, AddressHub addressHub, ShMonad shMonad) internal {
+    function __setUpAtlas(address deployer, AddressHub addressHub, ShMonad shMonad, address taskManager) internal {
         __createAccountsAtlas();
-        __deployContractsAtlas(deployer, addressHub, shMonad);
+        __deployContractsAtlas(deployer, addressHub, shMonad, taskManager);
         __initialBalancesAtlas(shMonad);
     }
 
@@ -85,7 +85,7 @@ contract SetupAtlas is Test {
         (solverFiveEOA, solverFivePK) = makeAddrAndKey("solverFiveEOA");
     }
 
-    function __deployContractsAtlas(address deployer, AddressHub addressHub, ShMonad shMonad) internal {
+    function __deployContractsAtlas(address deployer, AddressHub addressHub, ShMonad shMonad, address taskManager) internal {
         vm.startPrank(deployer);
         simulator = new Simulator();
 
@@ -110,6 +110,7 @@ contract SetupAtlas is Test {
             initialSurchargeRecipient: deployer,
             l2GasCalculator: address(0),
             factoryLib: address(factoryLib),
+            taskManager: address(taskManager),
             shMonad: addressHub.shMonad(),
             shMonadPolicyID: atlasPolicyID
         });

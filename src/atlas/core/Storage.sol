@@ -2,7 +2,6 @@
 pragma solidity 0.8.28;
 
 import "../types/EscrowTypes.sol";
-import "../types/LockTypes.sol";
 import "../libraries/AccountingMath.sol";
 
 import { AtlasEvents } from "../types/AtlasEvents.sol";
@@ -10,6 +9,7 @@ import { AtlasErrors } from "../types/AtlasErrors.sol";
 import { AtlasConstants } from "../types/AtlasConstants.sol";
 import { IAtlasVerification } from "../interfaces/IAtlasVerification.sol";
 import { IShMonad } from "../../shmonad/interfaces/IShMonad.sol";
+import { ITaskManager } from "../../task-manager/interfaces/ITaskManager.sol";
 
 /// @title Storage
 /// @author FastLane Labs
@@ -20,11 +20,11 @@ abstract contract Storage is AtlasEvents, AtlasErrors, AtlasConstants {
     address public immutable L2_GAS_CALCULATOR;
 
     IShMonad public immutable SHMONAD;
+    ITaskManager public immutable TASK_MANAGER;
     uint64 public immutable POLICY_ID;
 
     // Gas Accounting public constants
     uint256 public constant SCALE = AccountingMath._SCALE;
-    uint256 public constant FIXED_GAS_OFFSET = AccountingMath._FIXED_GAS_OFFSET;
 
     // Transient storage slots
     uint256 internal transient t_lock; // contains activeAddress, callConfig, and phase
@@ -54,6 +54,7 @@ abstract contract Storage is AtlasEvents, AtlasErrors, AtlasConstants {
         address simulator,
         address initialSurchargeRecipient,
         address l2GasCalculator,
+        address taskManager,
         address shMonad,
         uint64 shMonadPolicyID
     )
@@ -64,6 +65,7 @@ abstract contract Storage is AtlasEvents, AtlasErrors, AtlasConstants {
         SIMULATOR = simulator;
         L2_GAS_CALCULATOR = l2GasCalculator;
         POLICY_ID = shMonadPolicyID;
+        TASK_MANAGER = ITaskManager(taskManager);
 
         // Check Atlas gas surcharge fits in 24 bits
         if(atlasSurchargeRate > type(uint24).max) {

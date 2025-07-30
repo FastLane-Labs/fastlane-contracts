@@ -6,10 +6,8 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { AtlETH } from "./AtlETH.sol";
 import { IExecutionEnvironment } from "../interfaces/IExecutionEnvironment.sol";
-import { IAtlas } from "../interfaces/IAtlas.sol";
 import { ISolverContract } from "../interfaces/ISolverContract.sol";
 import { IAtlasVerification } from "../interfaces/IAtlasVerification.sol";
-import { IDAppControl } from "../interfaces/IDAppControl.sol";
 
 import { SafeCall } from "../libraries/SafeCall/SafeCall.sol";
 import { EscrowBits } from "../libraries/EscrowBits.sol";
@@ -43,6 +41,7 @@ abstract contract Escrow is AtlETH {
         address simulator,
         address initialSurchargeRecipient,
         address l2GasCalculator,
+        address taskManager,
         address shMonad,
         uint64 shMonadPolicyID
     )
@@ -52,6 +51,7 @@ abstract contract Escrow is AtlETH {
             simulator,
             initialSurchargeRecipient,
             l2GasCalculator,
+            taskManager,
             shMonad,
             shMonadPolicyID
         )
@@ -220,7 +220,7 @@ abstract contract Escrow is AtlETH {
 
                 if (_result.executionSuccessful()) {
                     // Logic done above `_handleSolverFailAccounting()` is to charge solver for gas used here
-                    ctx.solverOutcome = uint24(_result);
+                    ctx.solverOutcome = _result.toUint24();
 
                     // First successful solver call that paid what it bid
                     emit SolverTxResult(
@@ -256,7 +256,7 @@ abstract contract Escrow is AtlETH {
         }
 
         // If we reach this point, the solver call did not execute successfully.
-        ctx.solverOutcome = uint24(_result);
+        ctx.solverOutcome = _result.toUint24();
 
         emit SolverTxResult(
             solverOp.solver,
@@ -754,6 +754,30 @@ abstract contract Escrow is AtlETH {
 
         // No need to SafeCast - will revert above if too large for uint32
         ctx.dappGasLeft -= uint32(_gasUsed);
+    }
+
+    /// @notice Allocates any spare gas remaining to executing tasks on the TaskManager, which will generate fees.
+    /// @dev This is typically called outside of the try/catch and must therefore be careful not to revert.
+    /// @param feeBeneficiary The recipient of any fees generated from executing tasks.
+    /// @param targetGasReserve The remaining gas necessary for the calling (outer) function to complete.
+    /// @return feesCollected The fees generated from executing tasks.
+    function _allocateGasToTaskManager(address feeBeneficiary, uint256 targetGasReserve) internal returns (uint256) {
+        // Skip if TASK_MANAGER is not set (e.g., in tests)
+        if (address(TASK_MANAGER) == address(0)) {
+            return 0;
+        }
+
+        // Only call if we have enough gas for a full task
+        if (gasleft() * 63 / 64 < 135_000 + targetGasReserve) {
+            return 0;
+        }
+
+        // Under no circumstance should we allow a revert here to bubble up
+        try TASK_MANAGER.executeTasks(feeBeneficiary, targetGasReserve) returns (uint256 _feesEarned) {
+            return _feesEarned;
+        } catch {
+            return 0;
+        }
     }
 
     receive() external payable { }

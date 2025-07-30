@@ -3,10 +3,7 @@ pragma solidity 0.8.28;
 
 import { Storage } from "./Storage.sol";
 import { CallBits } from "../libraries/CallBits.sol";
-import "../types/SolverOperation.sol";
-import "../types/UserOperation.sol";
 import "../types/ConfigTypes.sol";
-import "../types/EscrowTypes.sol";
 import "../types/LockTypes.sol";
 
 /// @title SafetyLocks
@@ -22,6 +19,7 @@ abstract contract SafetyLocks is Storage {
         address simulator,
         address initialSurchargeRecipient,
         address l2GasCalculator,
+        address taskManager,
         address shMonad,
         uint64 shMonadPolicyID
     )
@@ -31,6 +29,7 @@ abstract contract SafetyLocks is Storage {
             simulator,
             initialSurchargeRecipient,
             l2GasCalculator,
+            taskManager,
             shMonad,
             shMonadPolicyID
         )

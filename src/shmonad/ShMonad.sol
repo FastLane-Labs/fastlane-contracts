@@ -42,7 +42,7 @@ contract ShMonad is Bonds {
      * @dev This is part of the OpenZeppelin Upgradeable pattern
      * @param deployer The address that will own the contract
      */
-    function initialize(address deployer) public reinitializer(8) {
+    function initialize(address deployer) public reinitializer(10) {
         __EIP712_init("ShMonad", "3");
         __Ownable_init(deployer);
     }
@@ -324,5 +324,7 @@ contract ShMonad is Bonds {
         );
 
         emit AgentExecuteWithSponsor(policyID, payor, msg.sender, recipient, msgValue, gasLimit, sharesDeducted128);
+
+        actualPayorCost = sharesDeducted128;
     }
 }

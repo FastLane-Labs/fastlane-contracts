@@ -19,10 +19,8 @@ import "../types/ValidCalls.sol";
 import { CallBits } from "../libraries/CallBits.sol";
 import { SafetyBits } from "../libraries/SafetyBits.sol";
 import { GasAccLib, GasLedger } from "../libraries/GasAccLib.sol";
-import { IL2GasCalculator } from "../interfaces/IL2GasCalculator.sol";
-import { IDAppControl } from "../interfaces/IDAppControl.sol";
 
-/// @title Atlas V1.6
+/// @title Atlas V1.6.3
 /// @author FastLane Labs
 /// @notice The Execution Abstraction protocol.
 contract Atlas is Escrow, Factory {
@@ -39,6 +37,7 @@ contract Atlas is Escrow, Factory {
         address initialSurchargeRecipient,
         address l2GasCalculator,
         address factoryLib,
+        address taskManager,
         address shMonad,
         uint64 shMonadPolicyID
     )
@@ -48,6 +47,7 @@ contract Atlas is Escrow, Factory {
             simulator,
             initialSurchargeRecipient,
             l2GasCalculator,
+            taskManager,
             shMonad,
             shMonadPolicyID
         )
@@ -119,6 +119,8 @@ contract Atlas is Escrow, Factory {
 
             // Gracefully return for results that need nonces to be stored and prevent replay attacks
             if (uint8(_validCallsResult) >= _GRACEFUL_RETURN_THRESHOLD && !_dConfig.callConfig.allowsReuseUserOps()) {
+                // Refund the bundler if they sent any msg.value, then return false and end early.
+                if (msg.value != 0) SafeTransferLib.safeTransferETH(msg.sender, msg.value);
                 return false;
             }
 
@@ -198,6 +200,15 @@ contract Atlas is Escrow, Factory {
 
             // Emit event indicating the metacall failed in `execute()`
             emit MetacallResult(msg.sender, userOp.from, false, 0, 0);
+        }
+
+        // Use any spare gas to generate additional revenue / fees for the intended gas refund beneficiary by executing
+        // tasks on the TaskManager.
+        uint256 _feesSharesEarned = _allocateGasToTaskManager(address(this), 25_000);
+
+        // Boost yield with the fees earned from executing tasks on the TaskManager
+        if (_feesSharesEarned > 0) {
+            SHMONAD.boostYield(_feesSharesEarned, address(this));
         }
 
         // The environment lock is explicitly released here to allow multiple (sequential, not nested) metacalls in a

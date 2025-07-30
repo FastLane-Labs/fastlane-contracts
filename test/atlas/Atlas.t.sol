@@ -552,10 +552,11 @@ contract AtlasTest is BaseTest, AtlasConstants {
 
         // Winner also pays for non-solver (C + E) gas, besides the unreached solver charge loop gas which is written
         // off (negligible)
-        uint256 nonSolverGas =
-            args.userOp.gas + control.getDAppGasLimit() + _BASE_TX_GAS_USED + AccountingMath._FIXED_GAS_OFFSET;
-        nonSolverGas +=
-            abi.encode(args.userOp, args.dAppOp, gasRefundBeneficiary).length * _CALLDATA_LENGTH_PREMIUM_HALVED;
+        uint256 nonSolverGas = 
+            args.userOp.gas + control.getDAppGasLimit() + _BASE_TX_GAS_USED + 
+            _PRE_EXECUTE_METACALL_GAS + _POST_SETTLE_METACALL_GAS;
+        
+        nonSolverGas += abi.encode(args.userOp, args.dAppOp, gasRefundBeneficiary).length * _GAS_PER_CALLDATA_BYTE;
 
         // Winning solver doesn't pay for loop to charge unreached solvers
         uint256 estWriteoffGas = (solverConfigs.length - solverIdx - 1) * WRITEOFF_GAS_PER_UNREACHED_SOLVER;
