@@ -35,7 +35,7 @@ contract AtlasVerification is EIP712, NonceManager, DAppIntegration {
         address atlas,
         address l2GasCalculator
     )
-        EIP712("AtlasVerification", "1.6")
+        EIP712("AtlasVerification", "1.6.3")
         DAppIntegration(atlas, l2GasCalculator)
     { }
 
@@ -679,20 +679,21 @@ contract AtlasVerification is EIP712, NonceManager, DAppIntegration {
         }
 
         allSolversCalldataGas =
-            GasAccLib.calldataGas(solverDataLenSum + (_SOLVER_OP_BASE_CALLDATA * solverOps.length), L2_GAS_CALCULATOR);
+            GasAccLib.calldataGas(solverDataLenSum + (_SOLVER_OP_STATIC_LENGTH * solverOps.length), L2_GAS_CALCULATOR);
 
         // NOTE: On Monad, _FIXED_GAS_OFFSET is added here to ensure we have enough gas for the whole metacall upfront.
         // But it is not added to the _gasMarker tracker at the start of metacall(), because winning solver must pay all
         // remaining gas in _settle() anyway - i.e. they do not get a rebate of gasleft().
-        uint256 metacallExecutionGas = _BASE_TX_GAS_USED + AccountingMath._FIXED_GAS_OFFSET + userOpGas
-            + dConfig.dappGasLimit + allSolversExecutionGas;
+        uint256 metacallExecutionGas = _BASE_TX_GAS_USED + _PRE_EXECUTE_METACALL_GAS + _POST_SETTLE_METACALL_GAS
+            + userOpGas + dConfig.dappGasLimit + allSolversExecutionGas;
+        // NOTE: On Monad, the _EXECUTE_SOLVER_OVERHEAD per solverOp is not included in the suggested gas limit.
 
         // In both exPostBids and normal bid modes, solvers pay for their own execution gas.
         allSolversGasLimit = allSolversExecutionGas;
 
         if (dConfig.callConfig.exPostBids()) {
             // Add extra execution gas for bid-finding loop of each solverOp
-            bidFindOverhead = (solverOpsLen * _BID_FIND_OVERHEAD) + allSolversExecutionGas;
+            bidFindOverhead = solverOpsLen * _BID_FIND_OVERHEAD + allSolversExecutionGas;
             metacallExecutionGas += bidFindOverhead;
             // NOTE: allSolversGasLimit excludes calldata in exPostBids mode.
         } else {
@@ -700,17 +701,21 @@ contract AtlasVerification is EIP712, NonceManager, DAppIntegration {
             allSolversGasLimit += allSolversCalldataGas;
         }
 
-        uint256 _execGasUpperTolerance = _UPPER_BASE_EXEC_GAS_TOLERANCE + solverOpsLen * _TOLERANCE_PER_SOLVER;
-        uint256 _execGasLowerTolerance = _LOWER_BASE_EXEC_GAS_TOLERANCE + solverOpsLen * _TOLERANCE_PER_SOLVER;
+        // If checkMetacallGasLimit is enabled, verify that the execution gas measured by gasleft() at the start of the
+        // metacall is in line with the expected gas limit, based on the userOp, solverOps, and dAppOp.
+        if (dConfig.callConfig.checkMetacallGasLimit()) {
+            uint256 _execGasUpperTolerance = _UPPER_BASE_EXEC_GAS_TOLERANCE + solverOpsLen * _TOLERANCE_PER_SOLVER;
+            uint256 _execGasLowerTolerance = _LOWER_BASE_EXEC_GAS_TOLERANCE + solverOpsLen * _TOLERANCE_PER_SOLVER;
 
-        // Gas limit set by the bundler cannot be too high or too low. Use Simulator contract to estimate gas limit.
-        // If gas limit is too low, the bonded balance threshold checked may not cover all gas reimbursements.
-        if (metacallGasLeft < metacallExecutionGas - _execGasLowerTolerance) {
-            verifyCallsResult = ValidCallsResult.MetacallGasLimitTooLow;
-        }
-        // If gas limit is too high, the bonded balance threshold checked could unexpectedly price out solvers.
-        if (metacallGasLeft > metacallExecutionGas + _execGasUpperTolerance) {
-            verifyCallsResult = ValidCallsResult.MetacallGasLimitTooHigh;
+            // Gas limit set by the bundler cannot be too high or too low. Use Simulator contract to estimate gas limit.
+            // If gas limit is too low, the bonded balance threshold checked may not cover all gas reimbursements.
+            if (metacallGasLeft < metacallExecutionGas - _execGasLowerTolerance) {
+                verifyCallsResult = ValidCallsResult.MetacallGasLimitTooLow;
+            }
+            // If gas limit is too high, the bonded balance threshold checked could unexpectedly price out solvers.
+            if (metacallGasLeft > metacallExecutionGas + _execGasUpperTolerance) {
+                verifyCallsResult = ValidCallsResult.MetacallGasLimitTooHigh;
+            }
         }
 
         return (verifyCallsResult, allSolversGasLimit, allSolversCalldataGas, bidFindOverhead);

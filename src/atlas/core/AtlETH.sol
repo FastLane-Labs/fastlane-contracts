@@ -18,6 +18,7 @@ abstract contract AtlETH is Permit69 {
         address simulator,
         address initialSurchargeRecipient,
         address l2GasCalculator,
+        address taskManager,
         address shMonad,
         uint64 shMonadPolicyID
     )
@@ -27,6 +28,7 @@ abstract contract AtlETH is Permit69 {
             simulator,
             initialSurchargeRecipient,
             l2GasCalculator,
+            taskManager,
             shMonad,
             shMonadPolicyID
         )

@@ -92,13 +92,13 @@ contract Sorter is AtlasConstants {
 
         // Calldata gas a winning solver would pay for: non-solverOp calldata + their own solverOp calldata
         uint256 calldataGas = (
-            USER_OP_STATIC_LENGTH + DAPP_OP_LENGTH + _SOLVER_OP_BASE_CALLDATA + userOp.data.length
-                + solverOp.data.length
-        ) * _CALLDATA_LENGTH_PREMIUM_HALVED;
+            USER_OP_STATIC_LENGTH + DAPP_OP_LENGTH + _SOLVER_OP_STATIC_LENGTH + _EXTRA_CALLDATA_LENGTH
+                + userOp.data.length + solverOp.data.length
+        ) * _GAS_PER_CALLDATA_BYTE;
 
         // Execution gas a winning solver would pay for
-        uint256 executionGas =
-            _BASE_TX_GAS_USED + AccountingMath._FIXED_GAS_OFFSET + solverOpGasLimit + userOp.gas + dConfig.dappGasLimit;
+        uint256 executionGas = _BASE_TX_GAS_USED + _PRE_EXECUTE_METACALL_GAS + _POST_SETTLE_METACALL_GAS
+            + solverOpGasLimit + userOp.gas + dConfig.dappGasLimit;
 
         uint256 maxSolverCost = (solverOp.maxFeePerGas * (executionGas + calldataGas)).withSurcharge(totalSurchargeRate);
 

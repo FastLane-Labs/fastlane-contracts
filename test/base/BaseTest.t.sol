@@ -72,8 +72,8 @@ contract BaseTest is
 
         // Upgrade implementations to the latest version
         SetupShMonad.__setUpShMonad(deployer, _shMonadProxyAdmin, addressHub);
-        SetupAtlas.__setUpAtlas(deployer, addressHub, shMonad); // Needs to be after shMonad is set up
         SetupTaskManager.__setUpTaskManager(deployer, _taskManagerProxyAdmin, addressHub);
+        SetupAtlas.__setUpAtlas(deployer, addressHub, shMonad, address(taskManager)); // Needs to be after shMonad and taskManager are set up
         SetupPaymaster.__setUpPaymaster(
             deployer,
             _paymasterProxyAdmin,
