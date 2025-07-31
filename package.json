@@ -1,6 +1,6 @@
 {
     "name": "@fastlane-labs/fastlane-contracts",
-    "version": "0.0.9",
+    "version": "0.0.10",
     "repository": {
         "type": "git",
         "url": "git+https://github.com/FastLane-Labs/fastlane-contracts.git"
