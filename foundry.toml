@@ -8,6 +8,7 @@
   evm_version = "cancun"
   via_ir = true
   isolate = false
+  gas_reports = ["ShMonad"]
   fs_permissions = [{ access = "read-write", path = "./"}]
   json = true
 

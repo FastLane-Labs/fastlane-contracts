@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import { VmSafe } from "forge-std/Vm.sol";
 import { UpgradeUtils } from "../../../script/upgradeability/UpgradeUtils.sol";
+import { JsonHelper } from "../../../script/utils/JsonHelper.sol";
 
 import { DummyGasRelayUpgradeable } from "./DummyGasRelayUpgradeable.sol";
 import { DummyGasRelay } from "./DummyGasRelay.sol";
@@ -21,6 +22,7 @@ import { ProxyAdmin } from "@openzeppelin/contracts/proxy/transparent/ProxyAdmin
 
 contract DummyGasRelayUpgradeableTest is BaseTest {
     using UpgradeUtils for VmSafe;
+    using JsonHelper for VmSafe;
 
     DummyGasRelayUpgradeable public dummyGasRelayImplementation;
     TransparentUpgradeableProxy public proxy;

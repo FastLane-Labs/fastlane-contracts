@@ -23,7 +23,10 @@ import { AddressHub } from "../../src/common/AddressHub.sol";
 import { Linked } from "../../src/common/Linked.sol";
 import { Directory } from "../../src/common/Directory.sol";
 import { UpgradeUtils } from "../../script/upgradeability/UpgradeUtils.sol";
+import { JsonHelper } from "../../script/utils/JsonHelper.sol";
 import { SponsoredExecutor } from "../../src/common/SponsoredExecutor.sol";
+import { UserOperation } from "../../src/atlas/types/UserOperation.sol";
+import { SolverOperation } from "../../src/atlas/types/SolverOperation.sol";
 
 contract BaseTest is
     SetupAtlas,
@@ -33,6 +36,7 @@ contract BaseTest is
     TestConstants
 {
     using UpgradeUtils for VmSafe;
+    using JsonHelper for VmSafe;
 
     uint256 constant SCALE = 1e18;
     address internal user = makeAddr("User");
@@ -40,7 +44,6 @@ contract BaseTest is
     address _shMonadProxyAdmin = TESTNET_SHMONAD_PROXY_ADMIN;
     address _taskManagerProxyAdmin = TESTNET_TASK_MANAGER_PROXY_ADMIN;
     address _paymasterProxyAdmin = TESTNET_PAYMASTER_PROXY_ADMIN;
-    address _rpcPolicyProxyAdmin = TESTNET_RPC_POLICY_PROXY_ADMIN;
 
     // The upgradable proxy of the AddressHub
     AddressHub internal addressHub;
@@ -50,25 +53,26 @@ contract BaseTest is
     address internal networkEntryPointV08Address = MONAD_TESTNET_ENTRY_POINT_V08;
 
     // Network configuration
-    string internal networkRpcUrl = "MONAD_TESTNET_RPC_URL";
-    uint256 internal forkBlock = MONAD_TESTNET_FORK_BLOCK;
-    bool internal isMonad = true;
+    string internal rpcUrl = vm.envString("MONAD_TESTNET_RPC_URL");
+    uint256 internal forkBlock;
+    bytes32 internal forkTxHash; // NEW: Support forking from transaction hash
 
     function setUp() public virtual {
-        _configureNetwork();
 
-        if (forkBlock != 0) {
-            vm.createSelectFork(vm.envString(networkRpcUrl), forkBlock);
+        // Set up the environment - Enhanced fork logic
+        if (forkTxHash != bytes32(0)) {
+            // Priority 1: Fork from specific transaction hash if set
+            vm.createSelectFork(rpcUrl, forkTxHash);
+        } else if (forkBlock != 0) {
+            // Priority 2: If forkBlock set to a specific block number, attempt to fork at that block
+            vm.createSelectFork(rpcUrl, forkBlock);
         } else {
-            vm.createSelectFork(vm.envString(networkRpcUrl));
+            // Priority 3: Otherwise (indicated by forkBlock == 0) use daily block update strategy
+            forkAtLastDeployOrDailyStart();
         }
 
         // Deploy AddressHub and migrate pointers
         __setUpAddressHub();
-
-        // if (isMainnet) {
-        //     SetupClearingHouse.__setUpClearingHouse(deployer, addressHub);
-        // }
 
         // Upgrade implementations to the latest version
         SetupShMonad.__setUpShMonad(deployer, _shMonadProxyAdmin, addressHub);
@@ -81,14 +85,6 @@ contract BaseTest is
             networkEntryPointV08Address,
             addressHub
         );
-    }
-
-    // Virtual function to configure network - can be overridden by test contracts
-    function _configureNetwork() internal virtual {
-        // Default configuration is mainnet
-        networkRpcUrl = "MONAD_TESTNET_RPC_URL";
-        forkBlock = 0; // 0 means latest block
-        isMonad = true;
     }
 
     // Uses cheatcodes to deploy AddressHub at preset address, and modifies storage to make deployer an owner.
@@ -126,5 +122,18 @@ contract BaseTest is
         addressHub.addPointerAddress(Directory._PAYMASTER_4337, _paymaster, "Paymaster");
         addressHub.addPointerAddress(Directory._RPC_POLICY, _rpcPolicy, "RpcPolicy");
         vm.stopPrank();
+    }
+
+    function forkAtLastDeployOrDailyStart() internal {
+        uint256 lastDeployPlus1 = VmSafe(vm).getLastDeployBlock({isMainnet: false}) + 1;
+
+        vm.createSelectFork(rpcUrl);
+        uint256 head = block.number;
+
+         // start of current 24 hr window
+        uint256 dailyStart = head - (head % BLOCKS_PER_DAY);
+        forkBlock = dailyStart > lastDeployPlus1 ? dailyStart : lastDeployPlus1;
+
+        vm.createSelectFork(rpcUrl, uint64(forkBlock));
     }
 }

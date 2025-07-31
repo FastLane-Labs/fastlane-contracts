@@ -21,18 +21,22 @@ interface ITaskManagerImmutables {
 abstract contract GasRelayConstants is GasRelayErrors {
     /// @notice Address of the task manager contract
     /// @dev Immutable contract reference for task management functionality
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     address public immutable TASK_MANAGER;
 
     /// @notice Policy ID for the task manager
     /// @dev Immutable ID used for task management policies
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     uint64 public immutable TASK_MANAGER_POLICY_ID;
 
     /// @notice Address of the ShMonad protocol
     /// @dev Immutable contract reference for ShMonad protocol interactions
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     address public immutable SHMONAD;
 
     /// @notice Address of the Atlas protocol
     /// @dev Immutable contract reference for Atlas protocol interactions
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     address public immutable ATLAS;
 
     /// @notice Minimum gas required for task execution
@@ -85,7 +89,6 @@ abstract contract GasRelayConstants is GasRelayErrors {
 
     /// @notice Transient storage bit for identifying tasks
     /// @dev Bit mask used to mark storage as a task
-    // 1<<163
     bytes32 internal constant _IS_TASK_BIT = 0x0000000000000000000000080000000000000000000000000000000000000000;
 
     /// @notice Combined bits for session key in use
@@ -99,6 +102,7 @@ abstract contract GasRelayConstants is GasRelayErrors {
 
     /// @notice Initializes the contract with required protocol addresses
     /// @dev Fetches addresses from the hub and initializes immutable variables
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         address _taskManager = IAddressHub(ADDRESS_HUB).taskManager();
         TASK_MANAGER = _taskManager;
