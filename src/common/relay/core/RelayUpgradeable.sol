@@ -18,18 +18,23 @@ contract RelayUpgradeable is GasRelayConstants {
     }
 
     /// @notice Namespace for session key storage
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     bytes32 private immutable _session_key_seed;
 
     /// @notice Namespace for key owner storage
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     bytes32 private immutable _key_owner_seed;
 
     /// @notice Namespace for underlying caller transient storage
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     bytes32 private immutable _underlying_caller_seed;
 
     /// @notice Namespace for initializable storage seed
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     bytes32 private immutable _init_storage_slot;
 
     /// @notice Implementation address
+    /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
     address private immutable _implementation;
 
     error BalanceMultiplierTooHigh();
@@ -37,6 +42,7 @@ contract RelayUpgradeable is GasRelayConstants {
     error ShMonadAddressWrong();
 
     /// @notice Constructor for RelayUpgradeable
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _implementation = address(this);
 

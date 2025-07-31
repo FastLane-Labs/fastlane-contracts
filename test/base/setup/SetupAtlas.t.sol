@@ -10,6 +10,11 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { Atlas } from "../../../src/atlas/core/Atlas.sol";
 import { AtlasVerification } from "../../../src/atlas/core/AtlasVerification.sol";
 import { Simulator } from "../../../src/atlas/helpers/Simulator.sol";
+
+// Test Atlas imports - always use test versions for better test coverage
+import { TestAtlas } from "../../../test/atlas/helpers/TestAtlas.sol";
+import { TestAtlasVerification } from "../../../test/atlas/helpers/TestAtlasVerification.sol";
+import { TestSimulator } from "../../../test/atlas/helpers/TestSimulator.sol";
 import { Sorter } from "../../../src/atlas/helpers/Sorter.sol";
 import { GovernanceBurner } from "../../../src/atlas/helpers/GovernanceBurner.sol";
 import { FactoryLib } from "../../../src/atlas/core/FactoryLib.sol";
@@ -87,7 +92,8 @@ contract SetupAtlas is Test {
 
     function __deployContractsAtlas(address deployer, AddressHub addressHub, ShMonad shMonad, address taskManager) internal {
         vm.startPrank(deployer);
-        simulator = new Simulator();
+        // Deploy TestSimulator for test access to internal functions
+        simulator = new TestSimulator();
 
         // Create the Atlas policy in ShMonad
         // 240 blocks = 120 seconds = 2 mins unbonding time on Monad
@@ -103,7 +109,8 @@ contract SetupAtlas is Test {
             deployCode("src/atlas/precompiles/FactoryLib.sol/FactoryLib.json", abi.encode(address(execEnvTemplate)))
         );
 
-        atlas = new Atlas({
+        // Deploy TestAtlas for test access to internal functions
+        atlas = new TestAtlas({
             atlasSurchargeRate: DEFAULT_ATLAS_SURCHARGE_RATE,
             verification: expectedAtlasVerificationAddr,
             simulator: address(simulator),
@@ -114,7 +121,8 @@ contract SetupAtlas is Test {
             shMonad: addressHub.shMonad(),
             shMonadPolicyID: atlasPolicyID
         });
-        atlasVerification = new AtlasVerification(address(atlas), address(0));
+        // Deploy TestAtlasVerification for test access to internal functions
+        atlasVerification = new TestAtlasVerification(address(atlas), address(0));
         simulator.setAtlas(address(atlas));
         sorter = new Sorter(address(atlas));
         govBurner = new GovernanceBurner();
