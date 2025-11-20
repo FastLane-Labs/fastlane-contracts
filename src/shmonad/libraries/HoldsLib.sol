@@ -1,21 +1,20 @@
 //SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.28;
+pragma solidity >=0.8.28 <0.9.0;
 
-import { PolicyAccount, BondedData } from "../Types.sol";
+import { PolicyAccount, CommittedData } from "../Types.sol";
+import { ZERO } from "../Constants.sol";
 
 /// @title HoldsLib
 /// @notice Library for shMONAD's Holds functionality implemented using transient storage
 library HoldsLib {
-    uint256 private constant ZERO = 0;
+    error InsufficientCommittedForHold(uint256 committed, uint256 holdRequested);
 
-    error InsufficientBondedForHold(uint256 bonded, uint256 holdRequested);
-
-    function hold(PolicyAccount memory pAcc, BondedData storage bondedData, uint256 amount) internal {
+    function hold(PolicyAccount memory pAcc, CommittedData storage committedData, uint256 amount) internal {
         bytes32 slot = _holdKey(pAcc);
         amount += _getHoldAmount(slot);
-        uint256 bonded = bondedData.bonded;
+        uint256 committed = committedData.committed;
 
-        require(bonded >= amount, InsufficientBondedForHold(bonded, amount));
+        require(committed >= amount, InsufficientCommittedForHold(committed, amount));
 
         _setHoldAmount(slot, amount);
     }
@@ -41,7 +40,6 @@ library HoldsLib {
     }
 
     function _holdKey(PolicyAccount memory pAcc) internal pure returns (bytes32) {
-        // TODO check if abi.encodePacked(pAcc) is less gas
         return bytes32((uint256(uint160(pAcc.account)) << 64) | uint256(pAcc.policyID));
     }
 

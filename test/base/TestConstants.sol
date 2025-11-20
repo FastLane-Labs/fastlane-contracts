@@ -4,7 +4,7 @@ pragma solidity 0.8.28;
 // For any shared test constants (not specific to a protocol's setup)
 contract TestConstants {
     // Monad Testnet Constants
-    uint256 internal constant BLOCKS_PER_DAY = 172_800; // 0.5s per block = 172_800 blocks per day
+    uint256 internal constant BLOCK_PIN_DURATION = 80_000; // reduced to avoid rpc lookup issues
 
     // AddressHub
     address internal constant TESTNET_ADDRESS_HUB = 0xC9f0cDE8316AbC5Efc8C3f5A6b571e815C021B51;

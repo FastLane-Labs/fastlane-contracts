@@ -1,14 +1,18 @@
 //SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.28;
+pragma solidity >=0.8.28 <0.9.0;
 
 import { OwnableUpgradeable } from "@openzeppelin-upgradeable/contracts/access/OwnableUpgradeable.sol";
 import { EIP712Upgradeable } from "@openzeppelin-upgradeable/contracts/utils/cryptography/EIP712Upgradeable.sol";
 import { NoncesUpgradeable } from "@openzeppelin-upgradeable/contracts/utils/NoncesUpgradeable.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import { SignatureChecker } from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+
 import { IERC20Permit } from "./interfaces/IERC20Full.sol";
 import { ShMonadHolds } from "./Holds.sol";
 import { Balance, Supply } from "./Types.sol";
+import { PERMIT_TYPEHASH } from "./Constants.sol";
 
 /// @author FastLane Labs
 /// @dev Based on OpenZeppelin's ERC20 implementation, with modifications to support shMonad's storage structure.
@@ -41,36 +45,64 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
     }
 
     /**
-     * @dev See {IERC20-totalSupply}.
+     * @dev Returns the real total supply of minted shMON.
      */
     function totalSupply() public view returns (uint256) {
-        return uint256(s_supply.total);
+        return _realTotalSupply();
     }
 
-    function bondedTotalSupply() external view returns (uint256) {
-        return uint256(s_supply.bondedTotal);
+    /**
+     * @dev Returns the real total supply of minted shMON.
+     */
+    function realTotalSupply() external view returns (uint256) {
+        return _realTotalSupply();
+    }
+
+    function committedTotalSupply() external view returns (uint256) {
+        return uint256(s_supply.committedTotal);
+    }
+
+    /**
+     * @dev Returns the real total supply of minted shMON.
+     */
+    function _realTotalSupply() internal view returns (uint256) {
+        return uint256(s_supply.total);
     }
 
     /**
      * @dev See {IERC20-balanceOf}.
      */
     function balanceOf(address account) public view virtual returns (uint256) {
-        return s_balances[account].unbonded;
+        return s_balances[account].uncommitted;
     }
 
-    // Returns the account's total bonded balance across all policies.
-    function balanceOfBonded(address account) external view returns (uint256) {
-        return s_balances[account].bonded;
+    /**
+     * @notice Gets the total committed balance of an account across all policies.
+     * @param account The address to check.
+     * @return The committed balance in shares.
+     */
+    function balanceOfCommitted(address account) external view returns (uint256) {
+        return s_balances[account].committed;
     }
 
-    // Returns the account's bonded balance within a specific policy.
-    function balanceOfBonded(uint64 policyID, address account) external view returns (uint256) {
-        return s_bondedData[policyID][account].bonded;
+    /**
+     * @notice Gets the committed balance of an account within a specific policy.
+     * @param policyID The ID of the policy.
+     * @param account The address to check.
+     * @return The committed balance in shares.
+     */
+    function balanceOfCommitted(uint64 policyID, address account) external view returns (uint256) {
+        return s_committedData[policyID][account].committed;
     }
 
-    // Returns the account's unbonding balance within a specific policy.
-    function balanceOfUnbonding(uint64 policyID, address account) external view returns (uint256) {
-        return s_unbondingData[policyID][account].unbonding;
+    /**
+     * @notice Gets the uncommitting balance of an account within a specific policy.
+     * @param policyID The ID of the policy.
+     * @param account The address to check.
+     * @return The uncommitting balance in shares.
+     */
+    function balanceOfUncommitting(uint64 policyID, address account) external view returns (uint256) {
+        return s_uncommittingData[policyID][account].uncommitting;
     }
 
     /**
@@ -140,17 +172,19 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
         public
         virtual
     {
-        if (block.timestamp > deadline) {
-            revert ERC2612ExpiredSignature(deadline);
-        }
+        require(block.timestamp <= deadline, ERC2612ExpiredSignature(deadline));
 
         bytes32 structHash = keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, value, _useNonce(owner), deadline));
-
         bytes32 hash = _hashTypedDataV4(structHash);
 
-        address signer = ECDSA.recover(hash, v, r, s);
-        if (signer != owner) {
-            revert ERC2612InvalidSigner(signer, owner);
+        // 1) Try ECDSA first (works for EOAs, including 7702 EOAs with transient code)
+        address recovered = ECDSA.recover(hash, v, r, s);
+        if (recovered != owner) {
+            // 2) If not an ECDSA signer, try ERC-1271 for contract accounts
+            if (owner.code.length == 0) revert ERC2612InvalidSigner(recovered, owner);
+            bytes memory sig = abi.encodePacked(r, s, v);
+            bool ok = SignatureChecker.isValidSignatureNow(owner, hash, sig);
+            require(ok, ERC2612InvalidSigner(address(0), owner));
         }
 
         _approve(owner, spender, value);
@@ -190,12 +224,8 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
      * NOTE: This function is not virtual, {_update} should be overridden instead.
      */
     function _transfer(address from, address to, uint256 value) internal {
-        if (from == address(0)) {
-            revert ERC20InvalidSender(address(0));
-        }
-        if (to == address(0)) {
-            revert ERC20InvalidReceiver(address(0));
-        }
+        require(from != address(0), ERC20InvalidSender(address(0)));
+        require(to != address(0), ERC20InvalidReceiver(address(0)));
         _update(from, to, value);
     }
 
@@ -204,7 +234,7 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
      * (or `to`) is the zero address. All customizations to transfers, mints, and burns should be done by overriding
      * this function.
      *
-     * @dev Modifies the `unbonded` value of an account's balance, in the s_balances mapping.
+     * @dev Modifies the `uncommitted` value of an account's balance, in the s_balances mapping.
      *
      * Emits a {Transfer} event.
      */
@@ -215,26 +245,23 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
             s_supply.total += value128;
         } else {
             Balance memory fromBalance = s_balances[from];
-            uint256 fromUnbonded = fromBalance.unbonded;
-            if (fromUnbonded < value) {
-                revert ERC20InsufficientBalance(from, fromUnbonded, value);
-            }
+            uint256 fromUncommitted = fromBalance.uncommitted;
+            require(fromUncommitted >= value, ERC20InsufficientBalance(from, fromUncommitted, value));
             unchecked {
-                // Overflow not possible: value <= fromBalance <= totalSupply.
-                fromBalance.unbonded -= value128;
+                // Underflow not possible: value <= fromBalance <= totalSupply.
+                fromBalance.uncommitted -= value128;
                 s_balances[from] = fromBalance;
             }
         }
 
         if (to == address(0)) {
             unchecked {
-                // Overflow not possible: value <= totalSupply or value <= fromBalance <= totalSupply.
-                // NOTE: IS THIS STILL TRUE?
+                // Underflow not possible: value <= totalSupply or value <= fromBalance <= totalSupply.
                 s_supply.total -= value128;
             }
         } else {
-            // Overflow IS possible as s_supply.total is not a uint128, but Balance.unbonded is.
-            s_balances[to].unbonded += value128;
+            // Overflow IS possible as s_supply.total is not a uint128, but Balance.uncommitted is.
+            s_balances[to].uncommitted += value128;
         }
 
         emit Transfer(from, to, value);
@@ -249,9 +276,7 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
      * NOTE: This function is not virtual, {_update} should be overridden instead.
      */
     function _mint(address account, uint256 value) internal {
-        if (account == address(0)) {
-            revert ERC20InvalidReceiver(address(0));
-        }
+        require(account != address(0), ERC20InvalidReceiver(address(0)));
         _update(address(0), account, value);
     }
 
@@ -264,9 +289,7 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
      * NOTE: This function is not virtual, {_update} should be overridden instead
      */
     function _burn(address account, uint256 value) internal {
-        if (account == address(0)) {
-            revert ERC20InvalidSender(address(0));
-        }
+        require(account != address(0), ERC20InvalidSender(address(0)));
         _update(account, address(0), value);
     }
 
@@ -308,12 +331,8 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
      * Requirements are the same as {_approve}.
      */
     function _approve(address owner, address spender, uint256 value, bool emitEvent) internal virtual {
-        if (owner == address(0)) {
-            revert ERC20InvalidApprover(address(0));
-        }
-        if (spender == address(0)) {
-            revert ERC20InvalidSpender(address(0));
-        }
+        require(owner != address(0), ERC20InvalidApprover(address(0)));
+        require(spender != address(0), ERC20InvalidSpender(address(0)));
         s_allowances[owner][spender] = value;
         if (emitEvent) {
             emit Approval(owner, spender, value);
@@ -331,12 +350,21 @@ abstract contract FastLaneERC20 is ShMonadHolds, EIP712Upgradeable, NoncesUpgrad
     function _spendAllowance(address owner, address spender, uint256 value) internal virtual {
         uint256 currentAllowance = allowance(owner, spender);
         if (currentAllowance < type(uint256).max) {
-            if (currentAllowance < value) {
-                revert ERC20InsufficientAllowance(spender, currentAllowance, value);
-            }
+            require(currentAllowance >= value, ERC20InsufficientAllowance(spender, currentAllowance, value));
             unchecked {
                 _approve(owner, spender, currentAllowance - value, false);
             }
         }
     }
+
+    function _convertToShares(
+        uint256 assets,
+        Math.Rounding rounding,
+        bool excludeRecentRevenue,
+        bool deductMsgValue
+    )
+        internal
+        view
+        virtual
+        returns (uint256);
 }

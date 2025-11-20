@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity 0.8.28;
+pragma solidity >=0.8.28 <0.9.0;
 
 import "forge-std/Test.sol";
 import "forge-std/StdJson.sol";

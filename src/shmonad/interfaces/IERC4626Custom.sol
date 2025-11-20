@@ -34,14 +34,15 @@ interface IERC4626Custom {
      */
     error ERC4626ExceededMaxRedeem(address owner, uint256 shares, uint256 max);
 
-    /// @notice Boosts yield by sending MON directly to the contract
-    /// @dev Uses msg.value for the yield boost
-    function boostYield() external payable;
+    /**
+     * @dev Exceeds the slippage set by user in the non-standard withdrawWithSlippageProtection function.
+     */
+    error ERC4626WithdrawSlippageExceeded(address owner, uint256 sharesRequired, uint256 maxBurntShares);
 
-    /// @notice Boosts yield by using a specific address's shares
-    /// @param shares The amount of shMON shares to use for boosting yield
-    /// @param from The address providing the shares
-    function boostYield(uint256 shares, address from) external;
+    /**
+     * @dev Exceeds the slippage set by user in the non-standard redeemWithSlippageProtection function.
+     */
+    error ERC4626RedeemSlippageExceeded(address owner, uint256 netAssets, uint256 minNetAssets);
 
     /**
      * @dev Returns the address of the underlying token used for the Vault for accounting, depositing, and withdrawing.
@@ -210,6 +211,23 @@ interface IERC4626Custom {
     function withdraw(uint256 assets, address receiver, address owner) external returns (uint256 shares);
 
     /**
+     * @dev Burns shares from owner and sends exactly assets of underlying tokens to receiver with slippage protection.
+     * @param assets The amount of assets to withdraw.
+     * @param receiver The address to receive the assets.
+     * @param owner The address of the owner of the shares.
+     * @param maxBurntShares The maximum amount of shares that can be burnt.
+     * @return shares The amount of shares withdrawn.
+     */
+    function withdrawWithSlippageProtection(
+        uint256 assets,
+        address receiver,
+        address owner,
+        uint256 maxBurntShares
+    )
+        external
+        returns (uint256 shares);
+
+    /**
      * @dev Returns the maximum amount of Vault shares that can be redeemed from the owner balance in the Vault,
      * through a redeem call.
      *
@@ -249,4 +267,21 @@ interface IERC4626Custom {
      * Those methods should be performed separately.
      */
     function redeem(uint256 shares, address receiver, address owner) external returns (uint256 assets);
+
+    /**
+     * @dev Burns shares from owner and sends assets of underlying tokens to receiver with slippage protection.
+     * @param shares The amount of shares to redeem.
+     * @param receiver The address to receive the assets.
+     * @param owner The address of the owner of the shares.
+     * @param minAmountOut The minimum amount of assets that must be received.
+     * @return assets The amount of assets redeemed.
+     */
+    function redeemWithSlippageProtection(
+        uint256 shares,
+        address receiver,
+        address owner,
+        uint256 minAmountOut
+    )
+        external
+        returns (uint256 assets);
 }
