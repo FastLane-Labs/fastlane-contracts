@@ -1,0 +1,26 @@
+{
+  "lib/account-abstraction-v7": {
+    "branch": {
+      "name": "releases/v0.7",
+      "rev": "7af70c8993a6f42973f520ae0752386a5032abe7"
+    }
+  },
+  "lib/account-abstraction-v8": {
+    "branch": {
+      "name": "releases/v0.8",
+      "rev": "4cbc06072cdc19fd60f285c5997f4f7f57a588de"
+    }
+  },
+  "lib/forge-std": {
+    "rev": "bf909b22fa55e244796dfa920c9639fdffa1c545"
+  },
+  "lib/openzeppelin-contracts": {
+    "rev": "48bd2864c6c696bf424ee0e2195f2d72ddd1a86c"
+  },
+  "lib/openzeppelin-contracts-upgradeable": {
+    "rev": "7e1007d923edfddbb7d30ddf317f2fb52cde17be"
+  },
+  "lib/solady": {
+    "rev": "73f13dd1483707ef6b4d16cb0543570b7e1715a8"
+  }
+}

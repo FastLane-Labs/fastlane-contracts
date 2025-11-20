@@ -1,5 +1,5 @@
 //SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.28;
+pragma solidity >=0.8.28 <0.9.0;
 
 import { Linked } from "./Linked.sol";
 import { Directory } from "./Directory.sol";
