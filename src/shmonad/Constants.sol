@@ -14,7 +14,7 @@ address constant NATIVE_TOKEN = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEE
 address constant OWNER_COMMISSION_ACCOUNT = address(0x1111111111111111111111111111111111111111);
 
 // Deterministic deployment salt namespace for Coinbase contracts
-uint256 constant COINBASE_PROCESS_GAS_LIMIT = 100_000;
+uint256 constant COINBASE_PROCESS_GAS_LIMIT = 150_000;
 bytes32 constant COINBASE_SALT = keccak256("SHMONAD_COINBASE");
 uint256 constant TRANSFER_GAS_LIMIT = 50_000; // gas headroom for multisig recipient support
 
