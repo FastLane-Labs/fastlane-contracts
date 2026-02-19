@@ -14,6 +14,37 @@ import { TestShMonad } from "../../base/helpers/TestShMonad.sol";
 import { MockMonadStakingPrecompile } from "src/shmonad/mocks/MockMonadStakingPrecompile.sol";
 import { MONAD_EPOCH_LENGTH, TARGET_FLOAT, SCALE, RAY, UNKNOWN_VAL_ADDRESS, MIN_VALIDATOR_DEPOSIT, UNKNOWN_VAL_ID } from "src/shmonad/Constants.sol";
 
+contract MaliciousCoinbaseReentrantDeposit {
+    address public immutable SHMONAD;
+    uint64 public immutable VAL_ID;
+    address public immutable AUTH_ADDRESS;
+    uint256 public immutable depositAmount;
+
+    bytes public lastRevertData;
+    bool public reentryBlocked;
+
+    constructor(address shmonad, uint64 valId, address authAddress, uint256 amount) {
+        SHMONAD = shmonad;
+        VAL_ID = valId;
+        AUTH_ADDRESS = authAddress;
+        depositAmount = amount;
+    }
+
+    function process() external returns (bool) {
+        (bool ok, bytes memory revertData) = SHMONAD.call{ value: depositAmount }(
+            abi.encodeWithSignature("deposit(uint256,address)", depositAmount, AUTH_ADDRESS)
+        );
+        if (!ok) {
+            reentryBlocked = true;
+            lastRevertData = revertData;
+        }
+
+        return true;
+    }
+
+    receive() external payable { }
+}
+
 contract ComplexScenarios is BaseTest {
     using Math for uint256;
 
@@ -30,6 +61,7 @@ contract ComplexScenarios is BaseTest {
     uint256 internal baselineTargetLiquidity;
     uint256 internal constant START_BAL = 1_000_000 ether;
     uint128 internal constant VALIDATOR_FEE_RATE = uint128(SCALE / 10); // 10% (1e17)
+    bytes4 internal constant REENTRANCY_SELECTOR = bytes4(keccak256("ReentrancyGuardReentrantCall()"));
 
     function setUp() public override {
         super.setUp();
@@ -49,13 +81,40 @@ contract ComplexScenarios is BaseTest {
         vm.stopPrank();
 
         _seedUsers(4);
-        _registerValidators(10);
+        _initValidators(10);
 
         // Prime allocator with the initial epoch transition so sentinel math is stabilized.
         _advanceEpoch(false);
 
         baselinePoolLiquidity = scenarioShMonad.getCurrentLiquidity();
         baselineTargetLiquidity = scenarioShMonad.getTargetLiquidity();
+    }
+
+    function _initValidators(uint256 count) internal {
+        if (useLocalMode) {
+            _registerValidators(count);
+        } else {
+            _useExistingValidators(count);
+        }
+    }
+
+    function _useExistingValidators(uint256 desiredCount) internal {
+        (uint64[] memory ids, address[] memory coinbases) = scenarioShMonad.listActiveValidators();
+
+        uint256 filled;
+        for (uint256 i = 0; i < ids.length && filled < desiredCount; i++) {
+            uint64 valId = ids[i];
+            address coinbase = coinbases[i];
+            if (valId == 0 || coinbase == address(0)) continue;
+
+            validatorIds.push(valId);
+            validatorCoinbases.push(coinbase);
+            unchecked {
+                ++filled;
+            }
+        }
+
+        require(filled == desiredCount, "insufficient active validators in fork");
     }
 
     function _seedUsers(uint256 count) internal {
@@ -233,7 +292,36 @@ contract ComplexScenarios is BaseTest {
         return fee * 10_000 / grossAssets;
     }
 
+    function test_ShMonad_processCoinbaseByAuth_reentrancyBlocked() public {
+        address attacker = makeAddr("reentryAttacker");
+        uint256 depositAmount = 1 ether;
+        MaliciousCoinbaseReentrantDeposit coinbase =
+            new MaliciousCoinbaseReentrantDeposit(address(scenarioShMonad), 123_456, attacker, depositAmount);
+
+        vm.deal(address(this), depositAmount);
+        (bool funded,) = address(coinbase).call{ value: depositAmount }("");
+        assertTrue(funded, "funding coinbase should succeed");
+
+        // processCoinbaseByAuth(address) is onlyOwner, so call as deployer
+        vm.prank(deployer);
+        scenarioShMonad.processCoinbaseByAuth(address(coinbase));
+
+        assertTrue(coinbase.reentryBlocked(), "reentry should be blocked");
+        bytes memory revertData = coinbase.lastRevertData();
+        assertGe(revertData.length, 4, "missing revert selector");
+
+        bytes4 selector;
+        assembly {
+            selector := mload(add(revertData, 0x20))
+        }
+
+        assertEq(selector, REENTRANCY_SELECTOR, "unexpected revert");
+    }
+
     function test_ShMonad_NormalOps() public {
+        // Fork mode uses an existing mainnet ShMonad state; this scenario assumes a fresh environment.
+        if (!useLocalMode) vm.skip(true);
+
         // Scenario: multi-user deposits → validator boosts → instant withdraw.
         // Confirms pool/target adjustments, earned-revenue weighting, preview accuracy,
         // and post-fee liquidity deltas in a single end-to-end flow.
@@ -380,6 +468,9 @@ contract ComplexScenarios is BaseTest {
     }
 
     function test_ShMonad_BlackSwanDeposit() public {
+        // Fork mode uses an existing mainnet ShMonad state; this scenario assumes a fresh environment.
+        if (!useLocalMode) vm.skip(true);
+
         // Scenario: a single large deposit arrives mid-epoch. Verifies the allocator
         // absorbs capital exactly once via the global target stake tracker.
         // Step 1: modest activity sets the pre-spike baseline.
@@ -646,6 +737,9 @@ contract ComplexScenarios is BaseTest {
     }
 
     function test_ShMonad_AccountingConservation() public {
+        // Fork mode uses an existing mainnet ShMonad state; this scenario assumes a fresh environment.
+        if (!useLocalMode) vm.skip(true);
+
         uint256 totalAssetsBefore = scenarioShMonad.totalAssets();
 
         _deposit(users[0], 12_000 ether);
@@ -722,6 +816,9 @@ contract ComplexScenarios is BaseTest {
     }
 
     function test_ShMonad_ValidatorRewardsRespectMinPayout() public {
+        // Fork mode uses an existing mainnet ShMonad state; this scenario assumes a fresh environment.
+        if (!useLocalMode) vm.skip(true);
+
         address coinbase = validatorCoinbases[0];
         uint64 valId = validatorIds[0];
 
@@ -831,6 +928,9 @@ contract ComplexScenarios is BaseTest {
     }
 
     function test_ShMonad_ScheduledStakeDoesNotEarnPriorRewards() public {
+        // Fork mode uses an existing mainnet ShMonad state; this scenario assumes a fresh environment.
+        if (!useLocalMode) vm.skip(true);
+
         uint64 valId = validatorIds[2];
         address delegator = users[2];
         uint256 baseAmount = 12 ether;

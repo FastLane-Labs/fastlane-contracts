@@ -6,6 +6,8 @@ import { BaseTest } from "../base/BaseTest.t.sol";
 import { ShMonadEvents } from "../../src/shmonad/Events.sol";
 import { ShMonadErrors } from "../../src/shmonad/Errors.sol";
 import { OWNER_COMMISSION_ACCOUNT, MIN_VALIDATOR_DEPOSIT, SCALE, UNSTAKE_BLOCK_DELAY } from "../../src/shmonad/Constants.sol";
+import { MockMonadStakingPrecompile } from "../../src/shmonad/mocks/MockMonadStakingPrecompile.sol";
+import { TestShMonad } from "../base/helpers/TestShMonad.sol";
 
 /**
  * ZeroYieldTranche.t.sol
@@ -30,9 +32,11 @@ contract ZeroYieldTrancheTest is BaseTest, ShMonadEvents {
     address internal bob;
 
     uint256 internal constant INITIAL_BAL = 200 ether;
+    TestShMonad internal testShMonad;
 
     function setUp() public override {
         super.setUp();
+        testShMonad = TestShMonad(payable(address(shMonad)));
         alice = makeAddr("alice");
         bob = makeAddr("bob");
         vm.deal(alice, INITIAL_BAL);
@@ -50,7 +54,51 @@ contract ZeroYieldTrancheTest is BaseTest, ShMonadEvents {
         // Move forward sufficiently in blocks to avoid boundary issues and trigger epoch change
         vm.roll(block.number + UNSTAKE_BLOCK_DELAY + 1);
         staking.harnessSyscallOnEpochChange(false);
+        if (!useLocalMode) {
+            uint64 internalEpochBefore = shMonad.getInternalEpoch();
+            for (uint256 i = 0; i < 4; i++) {
+                testShMonad.harnessCrankGlobalOnly();
+                if (shMonad.getInternalEpoch() > internalEpochBefore) {
+                    return;
+                }
+            }
+            revert("fork: crank did not advance internal epoch");
+        }
         while (!shMonad.crank()) {}
+    }
+
+    function _advanceEpochAndCrankValidator(uint64 valId) internal {
+        _advanceEpochAndCrank();
+        if (!useLocalMode) {
+            testShMonad.harnessCrankValidator(valId);
+        }
+    }
+
+    function _expectedDepositQueueDelta(uint256 assets) internal view returns (uint256 expected) {
+        (uint128 rewardsPayable, uint128 redemptionsPayable,) = shMonad.globalLiabilities();
+        uint256 currentLiabilities = uint256(rewardsPayable) + uint256(redemptionsPayable);
+        (, uint128 reservedAmount) = shMonad.getWorkingCapital();
+        (, uint128 pendingUnstaking) = shMonad.getGlobalPending();
+        uint256 currentAssets = testShMonad.exposeCurrentAssets();
+
+        if (currentLiabilities > uint256(reservedAmount) + uint256(pendingUnstaking) + currentAssets) {
+            uint256 uncovered = currentLiabilities - (uint256(reservedAmount) + uint256(pendingUnstaking));
+            if (assets > uncovered) {
+                uint256 surplus = assets - uncovered;
+                return uncovered + _subtractNetToAtomicLiquidityPreview(surplus);
+            }
+            return assets;
+        }
+
+        return _subtractNetToAtomicLiquidityPreview(assets);
+    }
+
+    function _subtractNetToAtomicLiquidityPreview(uint256 assets) internal view returns (uint256 remaining) {
+        uint256 targetPercent = testShMonad.scaledTargetLiquidityPercentage();
+        (, uint128 distributedAmount) = testShMonad.exposeGlobalAtomicCapital();
+        uint256 netToAtomic = (assets * targetPercent) / SCALE;
+        if (netToAtomic > uint256(distributedAmount)) netToAtomic = uint256(distributedAmount);
+        return assets - netToAtomic;
     }
 
     // Ensure a validator is registered, staked, and active so yield/rewards flows are exercised.
@@ -76,13 +124,67 @@ contract ZeroYieldTrancheTest is BaseTest, ShMonadEvents {
         // Crank forward until validator marked active
         bool active;
         for (uint256 i = 0; i < 4; ++i) {
-            _advanceEpochAndCrank();
+            _advanceEpochAndCrankValidator(valId);
             if (shMonad.isValidatorActive(valId)) {
                 active = true;
                 break;
             }
         }
         require(active, "validator should be active");
+    }
+
+    /// @dev Fork-mode friendly staking-yield setup:
+    ///      - creates a brand-new validator ID (>= 10_000 after snapshot seeding)
+    ///      - seeds validator+delegator state directly in the mock precompile so `addValidator()` sees it as active
+    ///      - does NOT rely on ShMonad's staking queue/deposit flows (which depend on existing fork state)
+    function _seedValidatorWithShMonadStake(
+        string memory tag,
+        uint256 totalStake,
+        uint256 shmonadStake
+    )
+        internal
+        returns (uint64 valId)
+    {
+        require(totalStake != 0, "totalStake=0");
+        require(shmonadStake != 0, "shmonadStake=0");
+        require(shmonadStake <= totalStake, "shmonadStake>totalStake");
+
+        address coinbase = makeAddr(tag);
+        valId = staking.registerValidator(coinbase);
+
+        // Seed validator stake so ShMonad's `addValidator()` seeds it as active immediately.
+        MockMonadStakingPrecompile.ValidatorSeed[] memory validators = new MockMonadStakingPrecompile.ValidatorSeed[](1);
+        validators[0] = MockMonadStakingPrecompile.ValidatorSeed({
+            valId: valId,
+            authAddress: coinbase,
+            consensusStake: totalStake,
+            consensusCommission: 0,
+            snapshotStake: totalStake,
+            snapshotCommission: 0,
+            executionAccumulator: 0,
+            executionUnclaimedRewards: 0,
+            secpPubkey: new bytes(0),
+            blsPubkey: new bytes(0)
+        });
+        staking.harnessUpsertValidators(validators);
+
+        // Seed ShMonad as a delegator so it can actually accrue and claim rewards.
+        MockMonadStakingPrecompile.DelegatorSeed[] memory delegators = new MockMonadStakingPrecompile.DelegatorSeed[](1);
+        delegators[0] = MockMonadStakingPrecompile.DelegatorSeed({
+            valId: valId,
+            delegator: address(shMonad),
+            stake: shmonadStake,
+            lastAccumulator: 0,
+            rewards: 0,
+            deltaStake: 0,
+            nextDeltaStake: 0,
+            deltaEpoch: 0,
+            nextDeltaEpoch: 0
+        });
+        staking.harnessUpsertDelegators(delegators);
+
+        vm.prank(deployer);
+        shMonad.addValidator(valId, coinbase);
     }
 
     // --------------------------------------------- //
@@ -95,6 +197,7 @@ contract ZeroYieldTrancheTest is BaseTest, ShMonadEvents {
 
         // Snapshot queueToStake/queueForUnstake before deposit
         (uint120 qToStakeBefore, uint120 qForUnstakeBefore) = shMonad.getGlobalCashFlows(0);
+        uint256 expectedQueueDelta = _expectedDepositQueueDelta(amount);
 
         uint256 zyBefore = shMonad.balanceOfZeroYieldTranche(receiver);
         uint256 totalZeroYieldBefore = _totalZeroYieldPayable();
@@ -114,7 +217,7 @@ contract ZeroYieldTrancheTest is BaseTest, ShMonadEvents {
         assertEq(_totalZeroYieldPayable(), totalZeroYieldBefore + amount, "admin totalZeroYieldPayable increases");
         // Queue to stake increases by the deposited amount; queue for unstake unchanged
         (uint120 qToStakeAfter, uint120 qForUnstakeAfter) = shMonad.getGlobalCashFlows(0);
-        assertEq(uint256(qToStakeAfter - qToStakeBefore), amount, "queueToStake += amount");
+        assertEq(uint256(qToStakeAfter - qToStakeBefore), expectedQueueDelta, "queueToStake += amount");
         assertEq(qForUnstakeAfter, qForUnstakeBefore, "queueForUnstake unchanged");
         // No shares minted on ZY deposit
         assertEq(shMonad.totalSupply(), totalSupplyBefore, "totalSupply unchanged on ZY deposit");
@@ -269,12 +372,17 @@ contract ZeroYieldTrancheTest is BaseTest, ShMonadEvents {
         // Seed distinct zero-yield balances
         vm.prank(alice);
         shMonad.depositToZeroYieldTranche{ value: aliceZY }(aliceZY, alice);
+        uint256 commissionBefore = shMonad.unclaimedOwnerCommission();
         vm.prank(alice);
         shMonad.depositToZeroYieldTranche{ value: commissionZY }(commissionZY, OWNER_COMMISSION_ACCOUNT);
 
         // Views return current balances
         assertEq(shMonad.balanceOfZeroYieldTranche(alice), aliceZY, "alice ZY view reflects balance");
-        assertEq(shMonad.unclaimedOwnerCommission(), commissionZY, "commission ZY view reflects balance");
+        assertEq(
+            shMonad.unclaimedOwnerCommission(),
+            commissionBefore + commissionZY,
+            "commission ZY view reflects balance"
+        );
 
         // After converting part of alice's and claiming part of commission, views should decrease accordingly
         uint256 aliceConvert = 1 ether;
@@ -290,7 +398,9 @@ contract ZeroYieldTrancheTest is BaseTest, ShMonadEvents {
             shMonad.balanceOfZeroYieldTranche(alice), aliceZY - aliceConvert, "alice ZY decreases after conversion"
         );
         assertEq(
-            shMonad.unclaimedOwnerCommission(), commissionZY - commissionClaim, "commission decreases after claim"
+            shMonad.unclaimedOwnerCommission(),
+            commissionBefore + commissionZY - commissionClaim,
+            "commission decreases after claim"
         );
     }
 
@@ -334,7 +444,7 @@ contract ZeroYieldTrancheTest is BaseTest, ShMonadEvents {
         // Prepare an active validator
         (, uint64 valId) = _ensureActiveValidator(address(0), "mevVal");
         // Fresh crank so inActiveSet_Current is set for this epoch
-        _advanceEpochAndCrank();
+        _advanceEpochAndCrankValidator(valId);
         // Configure fee params
         uint256 feeRateScaled = SCALE / 100; // 1%
         uint16 boostBps = 500; // Owner commission is 5% of the protocol fee
@@ -379,58 +489,170 @@ contract ZeroYieldTrancheTest is BaseTest, ShMonadEvents {
     // Commission on earned staking yield: rewards are claimed to ShMonad on validator crank.
     // The owner's commission is taken from the realized yield at `stakingCommissionBps`.
     function test_ShMonadCommission_stakingYield_creditsOwnerAndLiability_onCrank() public {
-        // Prepare an active validator and set a staking commission
-        (, uint64 valId) = _ensureActiveValidator(address(0), "yieldVal");
         uint16 stakingCommissionBps = 700; // 7%
-        vm.prank(deployer);
-        shMonad.updateStakingCommission(stakingCommissionBps);
-        // Make ShMonad a delegator with stake so it accrues claimable rewards
-        uint256 shmonadStake = 1 ether;
-        // Fund ShMonad via a third-party deposit so its balance increases naturally (works in both modes)
-        vm.deal(bob, shmonadStake);
-        vm.prank(bob);
-        shMonad.deposit{ value: shmonadStake }(shmonadStake, bob);
-        // Run a crank cycle so the contract pulls from the staking queue and delegates internally
-        _advanceEpochAndCrank();
-        // Advance once more to activate the freshly scheduled stake on the validator
-        _advanceEpochAndCrank();
-
-        // Inject rewards into the mock precompile (held there until ShMonad claims on crank)
         uint256 reward = 9 ether;
+
+        uint64 valId;
+        if (useLocalMode) {
+            // Local mode: exercise the full deposit -> queue -> delegate path.
+            (, valId) = _ensureActiveValidator(address(0), "yieldVal");
+
+            vm.prank(deployer);
+            shMonad.updateStakingCommission(stakingCommissionBps);
+
+            // Give ShMonad stake via the normal ERC4626 deposit flow.
+            uint256 shmonadStake = 1 ether;
+            vm.deal(bob, shmonadStake);
+            vm.prank(bob);
+            shMonad.deposit{ value: shmonadStake }(shmonadStake, bob);
+
+            // Delegate + activate stake on the validator.
+            _advanceEpochAndCrankValidator(valId);
+            _advanceEpochAndCrankValidator(valId);
+        } else {
+            // Fork mode: avoid relying on ShMonad's staking queue (which depends on existing fork state).
+            // Seed a validator where ShMonad has stake so it can accrue/claim rewards deterministically.
+            uint256 shmonadStake = 1 ether;
+            valId = _seedValidatorWithShMonadStake("yieldVal", shmonadStake, shmonadStake);
+
+            vm.prank(deployer);
+            shMonad.updateStakingCommission(stakingCommissionBps);
+
+            // New validators start with wasCranked=true on past epochs; advance twice so _crankValidator will run.
+            _advanceEpochAndCrankValidator(valId);
+            _advanceEpochAndCrankValidator(valId);
+        }
+
+        // Inject rewards into the mock precompile (held there until ShMonad claims on crank).
         vm.deal(alice, reward);
         vm.prank(alice);
         staking.harnessSyscallReward{ value: reward }(valId, reward);
 
         uint256 adminLiabilityBefore = _totalZeroYieldPayable();
         uint256 ownerCommissionBefore = shMonad.unclaimedOwnerCommission();
-        uint256 contractEthBefore = address(shMonad).balance;
 
-        // Equity is maintained via normal flows; no direct balance resets.
-
-        // Advance epoch and crank; this triggers _claimRewards -> _handleEarnedStakingYield
-        _advanceEpochAndCrank();
-
-        // Compute the share of reward accrued to ShMonad based on current epoch stake
-        (
-            address authAddress,,,,,, uint256 consensusStake,,,,,
-        ) = staking.getValidator(valId);
-        (
-            uint256 shmonadStakeUpdated,,,,,,
-        ) = staking.getDelegator(valId, address(shMonad));
-
+        // Compute expected commission from ShMonad's stake share (works in both modes).
+        (,,,,,, uint256 consensusStake,,,,,) = staking.getValidator(valId);
+        (uint256 shmonadStakeUpdated,,,,,,) = staking.getDelegator(valId, address(shMonad));
         uint256 shmonadReward = (reward * shmonadStakeUpdated) / consensusStake;
         uint256 expectedCommission = (shmonadReward * stakingCommissionBps) / 10_000;
 
-        // Owner commission and admin pool increase by staking commission on ShMonad's share
-        assertEq(
-            shMonad.unclaimedOwnerCommission(),
-            ownerCommissionBefore + expectedCommission,
-            "owner staking commission did not increase as expected"
-        );
-        assertEq(
-            _totalZeroYieldPayable(),
-            adminLiabilityBefore + expectedCommission,
-            "admin staking commission did not increase as expected"
-        );
+        // Advance epoch and crank; this triggers _claimRewards -> _handleEarnedStakingYield.
+        _advanceEpochAndCrankValidator(valId);
+
+        if (useLocalMode) {
+            // Local: clean slate, no fork background noise; assert exact deltas.
+            assertEq(
+                shMonad.unclaimedOwnerCommission(),
+                ownerCommissionBefore + expectedCommission,
+                "owner staking commission did not increase as expected"
+            );
+            assertEq(
+                _totalZeroYieldPayable(),
+                adminLiabilityBefore + expectedCommission,
+                "admin staking commission did not increase as expected"
+            );
+        } else {
+            // Fork: ShMonad may claim background rewards from existing validators during a crank.
+            // We only require that our injected reward increases commission/liability by at least the expected amount.
+            assertGe(
+                shMonad.unclaimedOwnerCommission(),
+                ownerCommissionBefore + expectedCommission,
+                "owner staking commission did not increase as expected"
+            );
+            assertGe(
+                _totalZeroYieldPayable(),
+                adminLiabilityBefore + expectedCommission,
+                "admin staking commission did not increase as expected"
+            );
+        }
+    }
+
+    // Verify that staking commission emits DepositToZeroYieldTranche event
+    function test_ShMonadCommission_stakingYield_emitsDepositToZeroYieldTranche() public {
+        uint16 stakingCommissionBps = 700; // 7%
+        uint256 reward = 9 ether;
+
+        uint64 valId;
+        if (useLocalMode) {
+            (, valId) = _ensureActiveValidator(address(0), "yieldVal");
+
+            vm.prank(deployer);
+            shMonad.updateStakingCommission(stakingCommissionBps);
+
+            // Give ShMonad stake via the normal ERC4626 deposit flow.
+            uint256 shmonadStake = 1 ether;
+            vm.deal(bob, shmonadStake);
+            vm.prank(bob);
+            shMonad.deposit{ value: shmonadStake }(shmonadStake, bob);
+
+            // Delegate + activate stake on the validator.
+            _advanceEpochAndCrankValidator(valId);
+            _advanceEpochAndCrankValidator(valId);
+        } else {
+            uint256 shmonadStake = 1 ether;
+            valId = _seedValidatorWithShMonadStake("yieldVal", shmonadStake, shmonadStake);
+
+            vm.prank(deployer);
+            shMonad.updateStakingCommission(stakingCommissionBps);
+
+            // New validators start with wasCranked=true on past epochs; advance twice so _crankValidator will run.
+            _advanceEpochAndCrankValidator(valId);
+            _advanceEpochAndCrankValidator(valId);
+        }
+
+        // Inject rewards into the mock precompile.
+        vm.deal(alice, reward);
+        vm.prank(alice);
+        staking.harnessSyscallReward{ value: reward }(valId, reward);
+
+        uint256 ownerCommissionBefore = shMonad.unclaimedOwnerCommission();
+
+        // Compute expected commission from ShMonad's stake share (works in both modes).
+        (,,,,,, uint256 consensusStake,,,,,) = staking.getValidator(valId);
+        (uint256 shmonadStakeUpdated,,,,,,) = staking.getDelegator(valId, address(shMonad));
+        uint256 shmonadReward = (reward * shmonadStakeUpdated) / consensusStake;
+        uint256 expectedCommission = (shmonadReward * stakingCommissionBps) / 10_000;
+
+        // Record logs to capture DepositToZeroYieldTranche event
+        vm.recordLogs();
+
+        // Advance epoch and crank; this triggers _claimRewards -> _handleEarnedStakingYield
+        _advanceEpochAndCrankValidator(valId);
+
+        // Verify commission was added
+        uint256 actualCommission = shMonad.unclaimedOwnerCommission() - ownerCommissionBefore;
+        if (useLocalMode) {
+            assertEq(actualCommission, expectedCommission, "commission mismatch");
+        } else {
+            assertGe(actualCommission, expectedCommission, "commission mismatch");
+        }
+
+        // Find and verify the DepositToZeroYieldTranche event for the staking commission
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bytes32 eventSig = keccak256("DepositToZeroYieldTranche(address,address,uint256)");
+        bool foundExpectedEvent = false;
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (entries[i].topics[0] == eventSig) {
+                address sender = address(uint160(uint256(entries[i].topics[1])));
+                address receiver = address(uint160(uint256(entries[i].topics[2])));
+                uint256 assets = abi.decode(entries[i].data, (uint256));
+
+                if (sender == address(shMonad) && receiver == OWNER_COMMISSION_ACCOUNT) {
+                    if (useLocalMode) {
+                        if (assets == expectedCommission) {
+                            foundExpectedEvent = true;
+                            break;
+                        }
+                    } else {
+                        if (assets >= expectedCommission) {
+                            foundExpectedEvent = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        assertTrue(foundExpectedEvent, "DepositToZeroYieldTranche event not emitted for staking commission");
     }
 }

@@ -100,6 +100,177 @@ contract MockMonadStakingPrecompileTest is Test {
         assertEq(staking.PAGINATED_RESULTS_SIZE(), 100, "PAGINATED_RESULTS_SIZE const mismatch");
     }
 
+    function test_MockMonadStaking_harnessSetEpoch_setsExternalEpochAndDelayFlag() public {
+        uint64 externalEpoch = staking.INITIAL_INTERNAL_EPOCH() + 123;
+        staking.harnessSetEpoch(externalEpoch, true);
+
+        (uint64 gotEpoch, bool inDelay) = staking.getEpoch();
+        assertEq(gotEpoch, externalEpoch);
+        assertTrue(inDelay);
+    }
+
+    function test_MockMonadStaking_harnessSetProposerValId_overridesGetProposerValId() public {
+        staking.harnessSetProposerValId(456);
+        assertEq(staking.getProposerValId(), 456);
+    }
+
+    function test_MockMonadStaking_harnessUpsertValidatorsAndDelegators_seedsViews() public {
+        uint64 valId = 777;
+        address auth = address(0xBEEF);
+        uint256 stake = staking.ACTIVE_VALIDATOR_STAKE();
+        uint256 consensusCommission = 0.2 ether;
+        uint256 snapshotCommission = 0.25 ether;
+
+        MockMonadStakingPrecompile.ValidatorSeed[] memory validators = new MockMonadStakingPrecompile.ValidatorSeed[](1);
+        validators[0] = MockMonadStakingPrecompile.ValidatorSeed({
+            valId: valId,
+            authAddress: auth,
+            consensusStake: stake,
+            consensusCommission: consensusCommission,
+            snapshotStake: stake,
+            snapshotCommission: snapshotCommission,
+            executionAccumulator: 0,
+            executionUnclaimedRewards: 0,
+            secpPubkey: new bytes(33),
+            blsPubkey: new bytes(48)
+        });
+        staking.harnessUpsertValidators(validators);
+
+        (address gotAuth,,,,,, uint256 consensusStake, uint256 gotConsensusCommission, uint256 snapshotStake, uint256 gotSnapshotCommission,,) =
+            staking.getValidator(valId);
+        assertEq(gotAuth, auth);
+        assertEq(consensusStake, stake);
+        assertEq(snapshotStake, stake);
+        assertEq(gotConsensusCommission, consensusCommission);
+        assertEq(gotSnapshotCommission, snapshotCommission);
+
+        (bool done,, uint64[] memory consensusSet) = staking.getConsensusValidatorSet(0);
+        assertTrue(done);
+        assertEq(consensusSet.length, 1);
+        assertEq(consensusSet[0], valId);
+
+        (bool doneSnap,, uint64[] memory snapshotSet) = staking.getSnapshotValidatorSet(0);
+        assertTrue(doneSnap);
+        assertEq(snapshotSet.length, 1);
+        assertEq(snapshotSet[0], valId);
+
+        uint64 externalEpoch = staking.INITIAL_INTERNAL_EPOCH() + 200;
+        staking.harnessSetEpoch(externalEpoch, false);
+
+        MockMonadStakingPrecompile.DelegatorSeed[] memory delegators = new MockMonadStakingPrecompile.DelegatorSeed[](1);
+        delegators[0] = MockMonadStakingPrecompile.DelegatorSeed({
+            valId: valId,
+            delegator: address(this),
+            stake: 1 ether,
+            lastAccumulator: 0,
+            rewards: 0,
+            deltaStake: 2 ether,
+            nextDeltaStake: 0,
+            deltaEpoch: externalEpoch + 1,
+            nextDeltaEpoch: 0
+        });
+        staking.harnessUpsertDelegators(delegators);
+
+        (uint256 dStake,,, uint256 deltaStake,, uint64 deltaEpoch,) = staking.getDelegator(valId, address(this));
+        assertEq(dStake, 1 ether);
+        assertEq(deltaStake, 2 ether);
+
+        // Delta epochs are stored internally (external - INITIAL_INTERNAL_EPOCH).
+        uint64 internalEpoch = externalEpoch - staking.INITIAL_INTERNAL_EPOCH();
+        assertEq(deltaEpoch, internalEpoch + 1);
+    }
+
+    function test_MockMonadStaking_harnessLoadSnapshot_decodesAndSeeds() public {
+        uint64 valId = 999;
+        address auth = address(0xD00D);
+        uint64 externalEpoch = staking.INITIAL_INTERNAL_EPOCH() + 55;
+
+        MockMonadStakingPrecompile.ValidatorSeed[] memory validators = new MockMonadStakingPrecompile.ValidatorSeed[](1);
+        validators[0] = MockMonadStakingPrecompile.ValidatorSeed({
+            valId: valId,
+            authAddress: auth,
+            consensusStake: staking.ACTIVE_VALIDATOR_STAKE(),
+            consensusCommission: 0.1 ether,
+            snapshotStake: staking.ACTIVE_VALIDATOR_STAKE(),
+            snapshotCommission: 0.1 ether,
+            executionAccumulator: 123,
+            executionUnclaimedRewards: 456,
+            secpPubkey: new bytes(33),
+            blsPubkey: new bytes(48)
+        });
+
+        MockMonadStakingPrecompile.DelegatorSeed[] memory delegators = new MockMonadStakingPrecompile.DelegatorSeed[](1);
+        delegators[0] = MockMonadStakingPrecompile.DelegatorSeed({
+            valId: valId,
+            delegator: alice,
+            stake: 3 ether,
+            lastAccumulator: 123,
+            rewards: 1 ether,
+            deltaStake: 0,
+            nextDeltaStake: 0,
+            deltaEpoch: 0,
+            nextDeltaEpoch: 0
+        });
+
+        MockMonadStakingPrecompile.WithdrawalSeed[] memory withdrawals = new MockMonadStakingPrecompile.WithdrawalSeed[](0);
+        bytes memory snapshot = abi.encode(externalEpoch, true, validators, delegators, withdrawals);
+        staking.harnessLoadSnapshot(snapshot);
+
+        (uint64 gotEpoch, bool inDelay) = staking.getEpoch();
+        assertEq(gotEpoch, externalEpoch);
+        assertTrue(inDelay);
+
+        (address gotAuth,,,,,, uint256 consensusStake,, uint256 snapshotStake,,,) = staking.getValidator(valId);
+        assertEq(gotAuth, auth);
+        assertEq(consensusStake, staking.ACTIVE_VALIDATOR_STAKE());
+        assertEq(snapshotStake, staking.ACTIVE_VALIDATOR_STAKE());
+
+        (uint256 stake,, uint256 rewards,,,,) = staking.getDelegator(valId, alice);
+        assertEq(stake, 3 ether);
+        assertEq(rewards, 1 ether);
+    }
+
+    function test_MockMonadStaking_harnessUpsertWithdrawals_allowsWithdraw() public {
+        uint64 valId = 888;
+        address auth = address(0xCAFE);
+        uint256 stake = staking.ACTIVE_VALIDATOR_STAKE();
+
+        MockMonadStakingPrecompile.ValidatorSeed[] memory validators = new MockMonadStakingPrecompile.ValidatorSeed[](1);
+        validators[0] = MockMonadStakingPrecompile.ValidatorSeed({
+            valId: valId,
+            authAddress: auth,
+            consensusStake: stake,
+            consensusCommission: 0,
+            snapshotStake: stake,
+            snapshotCommission: 0,
+            executionAccumulator: 0,
+            executionUnclaimedRewards: 0,
+            secpPubkey: new bytes(33),
+            blsPubkey: new bytes(48)
+        });
+        staking.harnessUpsertValidators(validators);
+
+        uint64 requestEpochExternal = staking.INITIAL_INTERNAL_EPOCH() + 10;
+        staking.harnessSetEpoch(requestEpochExternal + 2, false);
+
+        MockMonadStakingPrecompile.WithdrawalSeed[] memory withdrawals = new MockMonadStakingPrecompile.WithdrawalSeed[](1);
+        withdrawals[0] = MockMonadStakingPrecompile.WithdrawalSeed({
+            valId: valId,
+            delegator: alice,
+            withdrawalId: 7,
+            amount: 3 ether,
+            accumulator: 0,
+            epoch: requestEpochExternal
+        });
+        staking.harnessUpsertWithdrawals(withdrawals);
+
+        vm.deal(address(staking), 3 ether);
+        uint256 before = alice.balance;
+        vm.prank(alice);
+        staking.withdraw(valId, 7);
+        assertEq(alice.balance, before + 3 ether);
+    }
+
     function test_MockMonadStaking_addValidator_setsStateAndRegistersSelfDelegation() public {
         uint256 selfStake = staking.ACTIVE_VALIDATOR_STAKE();
         uint256 commission = 0.15 ether;

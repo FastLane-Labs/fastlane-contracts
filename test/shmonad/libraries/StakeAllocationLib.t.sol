@@ -424,89 +424,102 @@ contract StakeAllocationLibTest is Test {
         }
     }
 
-    // ------------------------------------------------ //
-    //  calculateDeactivatedValidatorEpochStakeDelta()  //
-    // ------------------------------------------------ //
+    // --------------------------------------------- //
+    // getValidatorAmountAvailableToUnstakeSnapshot() //
+    // --------------------------------------------- //
 
-    function test_StakeAllocationLib_calculateDeactivatedValidatorEpochStakeDelta_AlwaysWithdrawalAndSubtracts()
+    function test_StakeAllocationLib_getValidatorAmountAvailableToUnstakeSnapshot_NoDeposits_ReturnsTarget()
         public
     {
-        Epoch memory validatorEpoch_last = _makeEpoch(10 ether, false, false);
-        uint256 avail = 3.4 ether;
-
-        (uint128 target, uint128 net, bool isWithdrawal) =
-            StakeAllocationLib.calculateDeactivatedValidatorEpochStakeDelta(validatorEpoch_last, avail);
-
-        assertTrue(isWithdrawal, "deactivated validator always withdraws");
-        assertEq(net, uint128(avail), "net equals available amount");
-        assertEq(target, uint128(10 ether) - uint128(avail), "target reduced by net amount");
-    }
-
-    // --------------------------------------------- //
-    //   getValidatorAmountAvailableToUnstake()      //
-    // --------------------------------------------- //
-
-    function test_StakeAllocationLib_getValidatorAmountAvailableToUnstake_NoPending_ReturnsTarget() public {
-        Epoch memory validatorEpoch_LastLast = _makeEpoch(0, false, false);
         Epoch memory validatorEpoch_Last = _makeEpoch(1_000_000, false, false);
-        StakingEscrow memory validatorPendingEscrow_Last = _makeStakingEscrow(0, 0);
-        StakingEscrow memory validatorPendingEscrow_LastLast = _makeStakingEscrow(0, 0);
+        Epoch memory validatorEpoch_LastLast = _makeEpoch(1_000_000, false, false);
+        StakingEscrow memory validatorPendingEscrow_Last = _makeStakingEscrow(600_000, 0);
+        StakingEscrow memory validatorPendingEscrow_LastLast = _makeStakingEscrow(700_000, 0);
 
-        uint256 amount = StakeAllocationLib.getValidatorAmountAvailableToUnstake(
-            validatorEpoch_LastLast, validatorEpoch_Last, validatorPendingEscrow_Last, validatorPendingEscrow_LastLast
+        uint256 amount = StakeAllocationLib.getValidatorAmountAvailableToUnstakeSnapshot(
+            validatorEpoch_Last,
+            validatorEpoch_LastLast,
+            validatorPendingEscrow_Last,
+            validatorPendingEscrow_LastLast
         );
-        assertEq(amount, validatorEpoch_Last.targetStakeAmount, "no pending -> full target available");
+        assertEq(amount, validatorEpoch_Last.targetStakeAmount, "no deposits -> full target available");
     }
 
-    function test_StakeAllocationLib_getValidatorAmountAvailableToUnstake_PendingLast_SubtractsSaturating() public {
-        Epoch memory validatorEpoch_LastLast = _makeEpoch(0, false, false);
-        Epoch memory validatorEpoch_Last = _makeEpoch(1_000_000, true, false); // hasDeposit
+    function test_StakeAllocationLib_getValidatorAmountAvailableToUnstakeSnapshot_LastDeposit_SubtractsSaturating()
+        public
+    {
+        Epoch memory validatorEpoch_Last = _makeEpoch(1_000_000, true, false);
+        Epoch memory validatorEpoch_LastLast = _makeEpoch(1_000_000, false, false);
         StakingEscrow memory validatorPendingEscrow_Last = _makeStakingEscrow(600_000, 0);
         StakingEscrow memory validatorPendingEscrow_LastLast = _makeStakingEscrow(0, 0);
 
-        uint256 amount = StakeAllocationLib.getValidatorAmountAvailableToUnstake(
-            validatorEpoch_LastLast, validatorEpoch_Last, validatorPendingEscrow_Last, validatorPendingEscrow_LastLast
+        uint256 amount = StakeAllocationLib.getValidatorAmountAvailableToUnstakeSnapshot(
+            validatorEpoch_Last,
+            validatorEpoch_LastLast,
+            validatorPendingEscrow_Last,
+            validatorPendingEscrow_LastLast
         );
-        assertEq(amount, 400_000, "subtract pending staking from last epoch");
+        assertEq(amount, 400_000, "subtracts last pending staking");
 
-        // Saturating case: pending > target -> available is 0
         validatorPendingEscrow_Last = _makeStakingEscrow(2_000_000, 0);
-        amount = StakeAllocationLib.getValidatorAmountAvailableToUnstake(
-            validatorEpoch_LastLast, validatorEpoch_Last, validatorPendingEscrow_Last, validatorPendingEscrow_LastLast
+        amount = StakeAllocationLib.getValidatorAmountAvailableToUnstakeSnapshot(
+            validatorEpoch_Last,
+            validatorEpoch_LastLast,
+            validatorPendingEscrow_Last,
+            validatorPendingEscrow_LastLast
         );
         assertEq(amount, 0, "saturates to zero when pending exceeds target");
     }
 
-    function test_StakeAllocationLib_getValidatorAmountAvailableToUnstake_PendingLastLast_RequiresBoundary() public {
+    function test_StakeAllocationLib_getValidatorAmountAvailableToUnstakeSnapshot_LastLastBoundaryDeposit_Subtracts()
+        public
+    {
         Epoch memory validatorEpoch_Last = _makeEpoch(1_000_000, false, false);
-        // hasDeposit at lastLast but not cranked in boundary -> should NOT subtract
-        Epoch memory validatorEpoch_LastLast = _makeEpoch(0, true, false);
+        Epoch memory validatorEpoch_LastLast = _makeEpoch(1_000_000, true, true);
         StakingEscrow memory validatorPendingEscrow_Last = _makeStakingEscrow(0, 0);
-        StakingEscrow memory validatorPendingEscrow_LastLast = _makeStakingEscrow(250_000, 0);
+        StakingEscrow memory validatorPendingEscrow_LastLast = _makeStakingEscrow(300_000, 0);
 
-        uint256 amount = StakeAllocationLib.getValidatorAmountAvailableToUnstake(
-            validatorEpoch_LastLast, validatorEpoch_Last, validatorPendingEscrow_Last, validatorPendingEscrow_LastLast
+        uint256 amount = StakeAllocationLib.getValidatorAmountAvailableToUnstakeSnapshot(
+            validatorEpoch_Last,
+            validatorEpoch_LastLast,
+            validatorPendingEscrow_Last,
+            validatorPendingEscrow_LastLast
         );
-        assertEq(amount, validatorEpoch_Last.targetStakeAmount, "no boundary crank -> ignore lastLast pending");
-
-        // Now set boundary flag -> should subtract lastLast pending as well
-        validatorEpoch_LastLast = _makeEpoch(0, true, true);
-        amount = StakeAllocationLib.getValidatorAmountAvailableToUnstake(
-            validatorEpoch_LastLast, validatorEpoch_Last, validatorPendingEscrow_Last, validatorPendingEscrow_LastLast
-        );
-        assertEq(amount, 750_000, "subtract lastLast pending when cranked in boundary");
+        assertEq(amount, 700_000, "subtracts lastLast pending staking when boundary");
     }
 
-    function test_StakeAllocationLib_getValidatorAmountAvailableToUnstake_PendingBoth_SaturatesToZero() public {
-        Epoch memory validatorEpoch_Last = _makeEpoch(500_000, true, false);
-        Epoch memory validatorEpoch_LastLast = _makeEpoch(0, true, true);
-        StakingEscrow memory validatorPendingEscrow_Last = _makeStakingEscrow(400_000, 0);
-        StakingEscrow memory validatorPendingEscrow_LastLast = _makeStakingEscrow(200_000, 0);
+    function test_StakeAllocationLib_getValidatorAmountAvailableToUnstakeSnapshot_LastLastNonBoundary_Ignores()
+        public
+    {
+        Epoch memory validatorEpoch_Last = _makeEpoch(1_000_000, false, false);
+        Epoch memory validatorEpoch_LastLast = _makeEpoch(1_000_000, true, false);
+        StakingEscrow memory validatorPendingEscrow_Last = _makeStakingEscrow(0, 0);
+        StakingEscrow memory validatorPendingEscrow_LastLast = _makeStakingEscrow(300_000, 0);
 
-        uint256 amount = StakeAllocationLib.getValidatorAmountAvailableToUnstake(
-            validatorEpoch_LastLast, validatorEpoch_Last, validatorPendingEscrow_Last, validatorPendingEscrow_LastLast
+        uint256 amount = StakeAllocationLib.getValidatorAmountAvailableToUnstakeSnapshot(
+            validatorEpoch_Last,
+            validatorEpoch_LastLast,
+            validatorPendingEscrow_Last,
+            validatorPendingEscrow_LastLast
         );
-        assertEq(amount, 0, "combined pending exceeds target -> saturate to 0");
+        assertEq(amount, validatorEpoch_Last.targetStakeAmount, "non-boundary lastLast deposit ignored");
+    }
+
+    function test_StakeAllocationLib_getValidatorAmountAvailableToUnstakeSnapshot_BothDeposits_SubtractsBoth()
+        public
+    {
+        Epoch memory validatorEpoch_Last = _makeEpoch(1_000_000, true, false);
+        Epoch memory validatorEpoch_LastLast = _makeEpoch(1_000_000, true, true);
+        StakingEscrow memory validatorPendingEscrow_Last = _makeStakingEscrow(400_000, 0);
+        StakingEscrow memory validatorPendingEscrow_LastLast = _makeStakingEscrow(300_000, 0);
+
+        uint256 amount = StakeAllocationLib.getValidatorAmountAvailableToUnstakeSnapshot(
+            validatorEpoch_Last,
+            validatorEpoch_LastLast,
+            validatorPendingEscrow_Last,
+            validatorPendingEscrow_LastLast
+        );
+        assertEq(amount, 300_000, "subtracts last and boundary lastLast pending staking");
     }
 
     // --------------------------------------------- //

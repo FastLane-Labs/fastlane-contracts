@@ -69,7 +69,7 @@ contract StakeTrackerUnstakeFlowsTest is BaseTest {
 
         // After 4 epochs, validator should still be in the active registry (s_validatorIsActive)
         for (uint256 i = 0; i < SHMONAD_VALIDATOR_DEACTIVATION_PERIOD - 1; i++) {
-            _advanceEpochAndCrank();
+            _advanceEpochAndCrankValidator(validator);
             // Validator should still be in s_validatorIsActive during the delay
             assertTrue(
                 shMonad.isValidatorActive(valId),
@@ -83,7 +83,7 @@ contract StakeTrackerUnstakeFlowsTest is BaseTest {
         }
 
         // After the 5th epoch, crank should complete the deactivation
-        _advanceEpochAndCrank();
+        _advanceEpochAndCrankValidator(validator);
         assertFalse(shMonad.isValidatorActive(valId), "Validator should be fully deactivated after 5 epochs");
         assertEq(shMonad.getValidatorIdForCoinbase(validator), 0, "Validator mapping should be cleared");
         assertEq(shMonad.getValidatorCoinbase(valId), address(0), "Coinbase should be cleared");
@@ -99,13 +99,14 @@ contract StakeTrackerUnstakeFlowsTest is BaseTest {
         vm.stopPrank();
 
         uint256 initialBalance = address(shMonad).balance;
-        uint256 initialLiq = shMonad.getCurrentLiquidity();
         uint256 initialTarget = shMonad.getTargetLiquidity();
         uint256 initialAssets = shMonad.totalAssets();
 
         uint256 depositAmount = 150 ether;
         vm.prank(alice);
         shMonad.deposit{ value: depositAmount }(depositAmount, alice);
+        // Deposit is payable, so native balance must increase immediately (even on forks).
+        assertEq(address(shMonad).balance, initialBalance + depositAmount, "Contract balance should increase by deposit");
 
         _advanceEpochAndCrank();
 
@@ -114,31 +115,50 @@ contract StakeTrackerUnstakeFlowsTest is BaseTest {
         uint256 currentAssets = shMonad.totalAssets();
 
         uint256 assetDelta = currentAssets - initialAssets;
-        uint256 expectedTargetLiquidityDelta = FixedPointMathLib.mulDiv(depositAmount, TARGET_FLOAT, SCALE);
-        uint256 tolerance = useLocalMode ? AMOUNT_TOLERANCE : depositAmount * TARGET_FLOAT / SCALE + AMOUNT_TOLERANCE;
-        assertApproxEqAbs(
-            targetLiq,
-            initialTarget + expectedTargetLiquidityDelta,
-            tolerance,
-            "Target liquidity should match expectation"
-        );
-        assertEq(assetDelta, depositAmount, "Asset delta should equal deposit amount");
+        if (useLocalMode) {
+            uint256 expectedTargetLiquidityDelta = FixedPointMathLib.mulDiv(depositAmount, TARGET_FLOAT, SCALE);
+            assertApproxEqAbs(
+                targetLiq,
+                initialTarget + expectedTargetLiquidityDelta,
+                AMOUNT_TOLERANCE,
+                "Target liquidity should match expectation"
+            );
+        } else {
+            assertLe(targetLiq, currentAssets, "Target liquidity should not exceed total assets on fork");
+            assertLe(currentLiq, targetLiq, "Current liquidity should not exceed target on fork");
+        }
+        // On a mainnet fork, a crank can also realize background yield (claimRewards / withdrawal settlement),
+        // so totalAssets may increase by more than the deposit amount. In local mode we expect equality.
+        if (useLocalMode) {
+            assertEq(assetDelta, depositAmount, "Asset delta should equal deposit amount");
+        } else {
+            assertGe(assetDelta, depositAmount, "Asset delta should be at least the deposit amount on fork");
+        }
 
-        uint256 contractBalance = address(shMonad).balance;
-        assertEq(contractBalance, initialBalance + depositAmount, "Contract balance should increase by deposit");
+        // After a crank, forked mainnet state can settle withdrawals / claim rewards which changes native balance.
 
         _advanceEpochAndCrank();
 
         uint256 targetAfterCrank = shMonad.getTargetLiquidity();
         uint256 liquidityAfterCrank = shMonad.getCurrentLiquidity();
         uint256 totalAssetsAfterCrank = shMonad.totalAssets();
-        assertApproxEqAbs(
-            targetAfterCrank,
-            targetLiq,
-            1e17,
-            "Target liquidity should remain relatively unchanged ex interest after crank"
-        );
-        assertEq(liquidityAfterCrank, targetAfterCrank, "Liquidity should match target after crank");
+        if (useLocalMode) {
+            assertApproxEqAbs(
+                targetAfterCrank,
+                targetLiq,
+                1e17,
+                "Target liquidity should remain relatively unchanged ex interest after crank"
+            );
+        } else {
+            assertLe(targetAfterCrank, totalAssetsAfterCrank, "Target liquidity should not exceed total assets");
+        }
+        // Local mode converges to target exactly after a crank; forked mainnet may have outstanding
+        // liabilities/queues that prevent reaching the target in a single step.
+        if (useLocalMode) {
+            assertEq(liquidityAfterCrank, targetAfterCrank, "Liquidity should match target after crank");
+        } else {
+            assertLe(liquidityAfterCrank, targetAfterCrank, "Liquidity should not exceed target after crank on fork");
+        }
     }
 
     function test_StakeTracker_rejectsDuplicateCoinbase() public {
@@ -195,7 +215,7 @@ contract StakeTrackerUnstakeFlowsTest is BaseTest {
         vm.prank(deployer);
         shMonad.deactivateValidator(valId);
         uint256 removalEpoch = uint256(testShMonad.exposeInternalEpoch()) + SHMONAD_VALIDATOR_DEACTIVATION_PERIOD + 1;
-        _advanceToInternalEpoch(removalEpoch);
+        _advanceToInternalEpochForValidator(validator, removalEpoch);
         assertEq(shMonad.getValidatorIdForCoinbase(validator), 0, "mapping should clear after deactivate");
     }
 
@@ -218,7 +238,7 @@ contract StakeTrackerUnstakeFlowsTest is BaseTest {
         vm.prank(deployer);
         shMonad.deactivateValidator(valId);
         uint256 removalEpoch = uint256(testShMonad.exposeInternalEpoch()) + SHMONAD_VALIDATOR_DEACTIVATION_PERIOD + 1;
-        _advanceToInternalEpoch(removalEpoch);
+        _advanceToInternalEpochForValidator(validator, removalEpoch);
         assertFalse(shMonad.isValidatorActive(valId), "validator should deactivate");
     }
 
@@ -232,7 +252,7 @@ contract StakeTrackerUnstakeFlowsTest is BaseTest {
 
         // Should be possible to re-add the same validatorId + coinbase.
         uint256 reactivateEpoch = uint256(testShMonad.exposeInternalEpoch()) + SHMONAD_VALIDATOR_DEACTIVATION_PERIOD + 1;
-        _advanceToInternalEpoch(reactivateEpoch);
+        _advanceToInternalEpochForValidator(validator, reactivateEpoch);
         shMonad.addValidator(valId, validator);
         vm.stopPrank();
 
@@ -249,13 +269,13 @@ contract StakeTrackerUnstakeFlowsTest is BaseTest {
         shMonad.deactivateValidator(valId);
 
         uint256 reactivateEpoch = uint256(testShMonad.exposeInternalEpoch()) + SHMONAD_VALIDATOR_DEACTIVATION_PERIOD + 1;
-        _advanceToInternalEpoch(reactivateEpoch);
+        _advanceToInternalEpochForValidator(validator, reactivateEpoch);
 
         shMonad.addValidator(valId, validator);
         ValidatorStats memory statsBefore = shMonad.getValidatorStats(valId);
         vm.stopPrank();
 
-        _advanceEpochAndCrank();
+        _advanceEpochAndCrankValidator(validator);
 
         ValidatorStats memory statsAfter = shMonad.getValidatorStats(valId);
         assertEq(
@@ -286,6 +306,8 @@ contract StakeTrackerUnstakeFlowsTest is BaseTest {
         staking.harnessSyscallOnEpochChange(false);
         staking.harnessSyscallOnEpochChange(false);
         testShMonad.harnessSetGlobalStakedAmount(uint128(stakeSeed));
+
+        (uint128 pendingStakingBaseline, uint128 pendingUnstakingBaseline) = testShMonad.exposeGlobalPendingRaw();
 
         uint128 withdrawAmount = uint128(stakeSeed / 2);
         uint128 desiredNextTarget = uint128(stakeSeed - withdrawAmount);
@@ -348,8 +370,8 @@ contract StakeTrackerUnstakeFlowsTest is BaseTest {
 
 
         (uint128 pendingStakingGlobal, uint128 pendingUnstakingGlobal) = testShMonad.exposeGlobalPendingRaw();
-        assertEq(pendingStakingGlobal, 0, "global pending staking should remain zero");
-        assertEq(pendingUnstakingGlobal, 0, "global pending unstake drained after retry");
+        assertEq(pendingStakingGlobal, pendingStakingBaseline, "global pending staking should remain unchanged");
+        assertEq(pendingUnstakingGlobal, pendingUnstakingBaseline, "global pending unstake drained after retry");
 
         (uint256 remaining,,) = staking.getWithdrawalRequest(valId, address(shMonad), withdrawalId);
         assertEq(remaining, 0, "withdrawal request cleared on precompile");
@@ -372,9 +394,36 @@ contract StakeTrackerUnstakeFlowsTest is BaseTest {
         }
     }
 
+    function _advanceToInternalEpochForValidator(address validator, uint256 targetInternalEpoch) internal {
+        while (testShMonad.exposeInternalEpoch() < targetInternalEpoch) {
+            _advanceEpochAndCrankValidator(validator);
+        }
+    }
+
+    function _advanceEpochAndCrankValidator(address validator) internal {
+        _advanceEpochAndCrank();
+        if (!useLocalMode) {
+            uint256 valId = shMonad.getValidatorIdForCoinbase(validator);
+            if (valId == 0) return;
+            Epoch memory currentEpoch = testShMonad.exposeValidatorEpochCurrent(validator);
+            testShMonad.harnessRollValidatorEpochForwards(validator, currentEpoch.targetStakeAmount);
+        }
+    }
+
     function _advanceEpochAndCrank() internal {
-        vm.roll(block.number + UNSTAKE_BLOCK_DELAY + 1);
+        uint256 rollBy = useLocalMode ? UNSTAKE_BLOCK_DELAY + 1 : 50_000;
+        vm.roll(block.number + rollBy);
         staking.harnessSyscallOnEpochChange(false);
+        if (!useLocalMode) {
+            uint64 internalEpochBefore = shMonad.getInternalEpoch();
+            for (uint256 i = 0; i < 4; i++) {
+                TestShMonad(payable(address(shMonad))).harnessCrankGlobalOnly();
+                if (shMonad.getInternalEpoch() > internalEpochBefore) {
+                    return;
+                }
+            }
+            revert("fork: crank did not advance internal epoch");
+        }
         while (!shMonad.crank()) {}
     }
 }

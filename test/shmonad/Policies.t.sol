@@ -12,6 +12,8 @@ import {ShMonadErrors} from "../../src/shmonad/Errors.sol";
 import {Policy} from "../../src/shmonad/Types.sol";
 import {UncommitApproval} from "../../src/shmonad/Types.sol";
 import {MIN_TOP_UP_PERIOD_BLOCKS} from "../../src/shmonad/Constants.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import { TestShMonad } from "../base/helpers/TestShMonad.sol";
 
 contract PoliciesTest is BaseTest, ShMonadEvents {
     address public alice;
@@ -52,7 +54,28 @@ contract PoliciesTest is BaseTest, ShMonadEvents {
     function _advanceEpochAndCrank() internal {
         vm.roll(block.number + 50_000);
         staking.harnessSyscallOnEpochChange(false);
+        if (!useLocalMode) {
+            uint64 internalEpochBefore = shmonad.getInternalEpoch();
+            for (uint256 i = 0; i < 4; i++) {
+                TestShMonad(payable(address(shmonad))).harnessCrankGlobalOnly();
+                if (shmonad.getInternalEpoch() > internalEpochBefore) {
+                    return;
+                }
+            }
+            revert("fork: crank did not advance internal epoch");
+        }
         while (!shmonad.crank()) {}
+    }
+
+    function _sharesFromUnderlyingNoDeductCeil(uint256 assets) internal view returns (uint256 shares) {
+        // agentTransferFromCommitted(..., inUnderlying=true) uses `_convertToShares(amount, Ceil, deductRecentRevenue=false)`.
+        // There is no direct public wrapper for `deductRecentRevenue=false`, so replicate the math here:
+        // shares = ceil(assets * totalSupply / totalEquityWithoutDeduct)
+        uint256 supply = shmonad.totalSupply();
+        if (supply == 0) return 0;
+        uint256 equityNoDeduct = ShMonad(payable(address(shmonad))).totalAssets();
+        // Note: ShMonad.totalAssets() is the "no-deduct" view (matches deductRecentRevenue=false paths).
+        shares = Math.mulDiv(assets, supply, equityNoDeduct, Math.Rounding.Ceil);
     }
 
     // --------------------------------------------- //
@@ -335,8 +358,9 @@ contract PoliciesTest is BaseTest, ShMonadEvents {
         vm.prank(alice);
         shmonad.commit(policyID, alice, committedShares);
 
-        uint128 initialMinCommitted = 20 ether;
-        uint128 initialMaxTopUp = 30 ether;
+        uint256 uncommittedShares = mintedShares - committedShares;
+        uint128 initialMinCommitted = uint128(committedShares / 2);
+        uint128 initialMaxTopUp = uint128(uncommittedShares);
         vm.prank(alice);
         shmonad.setMinCommittedBalance(policyID, initialMinCommitted, initialMaxTopUp, uint32(MIN_TOP_UP_PERIOD_BLOCKS));
 
@@ -815,7 +839,7 @@ contract PoliciesTest is BaseTest, ShMonadEvents {
         _advanceEpochAndCrank();
 
         // Calculate the actual transfer amount before the transfer (shares)
-        uint256 expectedShares = shmonad.previewWithdraw(transferAmount);
+        uint256 expectedShares = _sharesFromUnderlyingNoDeductCeil(transferAmount);
         uint256 deployerBondedBalanceBefore = shmonad.balanceOfCommitted(deployer);
 
         // Agent (deployer) transfers from alice's bonded balance
@@ -868,6 +892,31 @@ contract PoliciesTest is BaseTest, ShMonadEvents {
             )
         );
         shmonad.agentTransferToUncommitted(policyID, alice, bob, requestedSpend, 0, false);
+    }
+
+    function test_Policies_agentTransferToUncommitted_maxMinCommitted_doesNotOverflow() public {
+        vm.prank(deployer);
+        uint64 policyID = shmonad.createPolicy(ESCROW);
+
+        uint256 depositAmount = 2 ether;
+        vm.startPrank(alice);
+        shmonad.depositAndCommit{ value: depositAmount }(policyID, alice, type(uint256).max);
+        shmonad.setMinCommittedBalance(policyID, type(uint128).max, 0, 0);
+        vm.stopPrank();
+
+        uint256 committedBefore = shmonad.balanceOfCommitted(policyID, alice);
+        uint256 spendShares = 1;
+        assertGt(committedBefore, spendShares, "precondition: committed > spend");
+
+        vm.prank(deployer);
+        shmonad.agentTransferToUncommitted(policyID, alice, bob, spendShares, 0, false);
+
+        assertEq(
+            shmonad.balanceOfCommitted(policyID, alice),
+            committedBefore - spendShares,
+            "committed balance should decrease"
+        );
+        assertEq(shmonad.balanceOf(bob), spendShares, "recipient uncommitted should increase");
     }
 
     // --------------------------------------------- //
@@ -1270,15 +1319,17 @@ contract PoliciesTest is BaseTest, ShMonadEvents {
 
         uint256 initialCommit = 10 ether;
         uint256 uncommittedReserve = 10 ether;
-        uint128 minCommitted = 5 ether;
 
         vm.startPrank(alice);
-        shmonad.depositAndCommit{ value: initialCommit }(policyID, alice, type(uint256).max);
+        uint256 committedShares = shmonad.depositAndCommit{ value: initialCommit }(policyID, alice, type(uint256).max);
         shmonad.deposit{ value: uncommittedReserve }(uncommittedReserve, alice);
+        uint128 minCommitted = uint128(committedShares / 2);
         shmonad.setMinCommittedBalance(policyID, minCommitted, type(uint128).max, MIN_TOP_UP_PERIOD_BLOCKS);
         vm.stopPrank();
 
-        uint256 spendAmount = 4 ether;
+        uint256 slack = committedShares - uint256(minCommitted);
+        require(slack > 2, "precondition: need slack to test top-up");
+        uint256 spendAmount = (slack / 2) + 1;
 
         // First spend should not require a top-up because committed - spend >= minCommitted
         uint256 committedBeforeFirst = shmonad.balanceOfCommitted(policyID, alice);
@@ -1308,6 +1359,7 @@ contract PoliciesTest is BaseTest, ShMonadEvents {
         if (committedBeforeSecond < spendAmount + minCommitted) {
             expectedTopUpShares = spendAmount + minCommitted - committedBeforeSecond;
         }
+        assertGt(expectedTopUpShares, 0, "precondition: expected a top-up on second spend");
         assertEq(
             uncommittedBeforeSecondSpend - uncommittedAfter,
             expectedTopUpShares,
@@ -1382,28 +1434,29 @@ contract PoliciesTest is BaseTest, ShMonadEvents {
         shmonad.addPolicyAgent(policyID, deployer);
 
         vm.startPrank(alice);
-        shmonad.depositAndCommit{ value: 10 ether }(policyID, alice, type(uint256).max);
+        uint256 committedShares = shmonad.depositAndCommit{ value: 10 ether }(policyID, alice, type(uint256).max);
         shmonad.deposit{ value: 5 ether }(5 ether, alice);
-        shmonad.setMinCommittedBalance(policyID, 5 ether, type(uint128).max, MIN_TOP_UP_PERIOD_BLOCKS);
+        uint128 minCommitted = uint128(committedShares / 2);
+        shmonad.setMinCommittedBalance(policyID, minCommitted, type(uint128).max, MIN_TOP_UP_PERIOD_BLOCKS);
         vm.stopPrank();
 
         uint256 uncommittedBefore = shmonad.balanceOf(alice);
         uint256 committedBefore = shmonad.balanceOfCommitted(policyID, alice);
 
         vm.prank(deployer);
-        shmonad.agentTransferToUncommitted(policyID, alice, bob, 6 ether, 0, false);
+        uint256 spendShares = committedBefore - uint256(minCommitted) + 1;
+        shmonad.agentTransferToUncommitted(policyID, alice, bob, spendShares, 0, false);
 
         assertEq(
             shmonad.balanceOfCommitted(policyID, alice),
-            5 ether,
+            uint256(minCommitted),
             "committed balance should remain at the minimum even when spend < committed"
         );
 
         // Shortfall in shares is max(0, minCommitted - (committedBefore - spend))
-        uint256 spendShares = 6 ether;
         uint256 expectedShortfall = 0;
-        if (committedBefore < spendShares + 5 ether) {
-            expectedShortfall = spendShares + 5 ether - committedBefore;
+        if (committedBefore < spendShares + uint256(minCommitted)) {
+            expectedShortfall = spendShares + uint256(minCommitted) - committedBefore;
         }
         assertEq(
             uncommittedBefore - shmonad.balanceOf(alice),

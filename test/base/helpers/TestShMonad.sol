@@ -10,6 +10,7 @@ import {
     AtomicCapital,
     StakingEscrow,
     CashFlows,
+    Revenue,
     ValidatorData
 } from "../../../src/shmonad/Types.sol";
 import { UNKNOWN_VAL_ID, UNKNOWN_VAL_ADDRESS, FIRST_VAL_ID, LAST_VAL_ID } from "../../../src/shmonad/Constants.sol";
@@ -120,13 +121,11 @@ contract TestShMonad is ShMonad {
 
     function exposeValidatorEpochCurrent(address coinbase) external view returns (Epoch memory epochData) {
         uint64 valId = _validatorIdForCoinbase(coinbase);
-        ValidatorData memory data = _getValidatorData(valId);
         epochData = validatorEpochPtr_N(0, valId);
     }
 
     function exposeValidatorEpochLastLastLast(address coinbase) external view returns (Epoch memory epochData) {
         uint64 valId = _validatorIdForCoinbase(coinbase);
-        ValidatorData memory data = _getValidatorData(valId);
         epochData = validatorEpochPtr_N(-3, valId);
     }
 
@@ -139,7 +138,6 @@ contract TestShMonad is ShMonad {
         returns (uint120 pendingStaking, uint120 pendingUnstaking)
     {
         uint64 valId = _validatorIdForCoinbase(coinbase);
-        ValidatorData memory data = _getValidatorData(valId);
         StakingEscrow storage escrow = validatorPendingPtr_N(offset, valId);
         pendingStaking = escrow.pendingStaking;
         pendingUnstaking = escrow.pendingUnstaking;
@@ -147,7 +145,6 @@ contract TestShMonad is ShMonad {
 
     function harnessRollValidatorEpochForwards(address coinbase, uint128 newTargetStakeAmount) external {
         uint64 valId = _validatorIdForCoinbase(coinbase);
-        ValidatorData memory data = _getValidatorData(valId);
         _rollValidatorEpochForwards(valId, newTargetStakeAmount);
     }
 
@@ -157,19 +154,58 @@ contract TestShMonad is ShMonad {
         _settlePastEpochEdges(data.id);
     }
 
+    function harnessSettleCoinbaseContract(uint64 valId, address coinbase) external {
+        _settleCoinbaseContract(valId, coinbase);
+    }
+
     function harnessMarkPendingWithdrawal(address coinbase, uint120 amount) external {
         uint64 valId = _validatorIdForCoinbase(coinbase);
-        ValidatorData memory data = _getValidatorData(valId);
         Epoch storage epoch = validatorEpochPtr_N(0, valId);
         epoch.hasWithdrawal = true;
         epoch.hasDeposit = false;
         epoch.crankedInBoundaryPeriod = false;
+        // epoch.targetStakeAmount -= uint128(amount); // TODO: <-- Fix tests that underflow on this line
         validatorPendingPtr_N(0, valId).pendingUnstaking += amount;
         s_globalPending.pendingUnstaking += amount;
     }
 
+    function harnessMarkPendingDeposit(address coinbase, uint120 amount, bool crankedInBoundaryPeriod) external {
+        uint64 valId = _validatorIdForCoinbase(coinbase);
+        Epoch storage epoch = validatorEpochPtr_N(0, valId);
+        epoch.hasDeposit = true;
+        epoch.hasWithdrawal = false;
+        epoch.crankedInBoundaryPeriod = crankedInBoundaryPeriod;
+        epoch.targetStakeAmount += uint128(amount);
+        validatorPendingPtr_N(0, valId).pendingStaking += amount;
+        s_globalPending.pendingStaking += amount;
+        s_globalCapital.stakedAmount += amount;
+    }
+
     function harnessSetGlobalStakedAmount(uint128 amount) external {
         s_globalCapital.stakedAmount = amount;
+    }
+
+    function harnessSetAtomicCapital(uint128 allocatedAmount, uint128 distributedAmount) external {
+        s_atomicAssets.allocatedAmount = allocatedAmount;
+        s_atomicAssets.distributedAmount = distributedAmount;
+    }
+
+    function harnessSetGlobalRevenue(uint120 allocatedRevenue, uint120 earnedRevenue) external {
+        Revenue storage revenue = globalRevenuePtr_N(0);
+        revenue.allocatedRevenue = allocatedRevenue;
+        revenue.earnedRevenue = earnedRevenue;
+        revenue.alwaysTrue = true;
+    }
+
+    function harnessSetGlobalCashFlows(uint120 queueToStake, uint120 queueForUnstake) external {
+        CashFlows storage cashFlows = globalCashFlowsPtr_N(0);
+        cashFlows.queueToStake = queueToStake;
+        cashFlows.queueForUnstake = queueForUnstake;
+        cashFlows.alwaysTrue = true;
+    }
+
+    function harnessCarryOverAtomicUnstakeIntoQueue() external {
+        _carryOverAtomicUnstakeIntoQueue();
     }
 
     // Force the internal crank cursor to the FIRST_VAL_ID sentinel so that
@@ -182,6 +218,24 @@ contract TestShMonad is ShMonad {
     // Used to verify that the next-to-crank view properly skips the placeholder.
     function harnessSetNextValidatorCursorToUnknown() external {
         s_nextValidatorToCrank = UNKNOWN_VAL_ID;
+    }
+
+    // Force `s_nextValidatorToCrank` to `LAST_VAL_ID` and run a global crank only (no validator loop).
+    // Intended for fork-mode tests that need deterministic global-epoch effects without paying O(n_validators) runtime.
+    function harnessCrankGlobalOnly() external returns (bool complete) {
+        s_nextValidatorToCrank = LAST_VAL_ID;
+        complete = _crankGlobal();
+    }
+
+    function harnessCrankValidator(uint64 valId) external {
+        _crankValidator(valId);
+    }
+
+    function harnessSeedGlobalPendingLast() external {
+        StakingEscrow memory pending = s_globalPending;
+        pending.alwaysTrue = true;
+        s_globalPendingLast = pending;
+        s_globalCapitalLast = s_globalCapital;
     }
 
     // Expose linked list internals for testing sentinel/placeholder placement.
@@ -199,6 +253,19 @@ contract TestShMonad is ShMonad {
 
     function exposePrevId(uint64 id) external view returns (uint64) {
         return s_valLinkPrevious[id];
+    }
+
+    function exposeGlobalPendingLastRaw()
+        external
+        view
+        returns (uint120 pendingStaking, uint120 pendingUnstaking, bool alwaysTrue)
+    {
+        StakingEscrow memory escrow = s_globalPendingLast;
+        return (escrow.pendingStaking, escrow.pendingUnstaking, escrow.alwaysTrue);
+    }
+
+    function harnessClearGlobalPendingLast() external {
+        delete s_globalPendingLast;
     }
 
     function getGrossAndFeeFromNetAssets(uint256 netAssets)

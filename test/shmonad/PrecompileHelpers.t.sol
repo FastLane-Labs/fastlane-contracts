@@ -296,7 +296,7 @@ contract PrecompileHelpersHarness is PrecompileHelpers {
     address internal constant STAKING_ADDR = address(0x5301);
 
     // expose internal helpers via wrappers
-    function call_claimRewards(uint64 valId) external expectsStakingRewards returns (uint120, bool) {
+    function call_claimRewards(uint64 valId) external expectsRewards returns (uint120, bool) {
         return _claimRewards(valId);
     }
 
@@ -310,7 +310,6 @@ contract PrecompileHelpersHarness is PrecompileHelpers {
 
     function call_completeWithdrawal(uint64 valId, uint8 wid)
         external
-        expectsUnstakingSettlement
         returns (uint128, bool, bool)
     {
         return _completeWithdrawal(valId, wid);
@@ -342,8 +341,7 @@ contract PrecompileHelpersHarness is PrecompileHelpers {
         return IMonadStaking(STAKING_ADDR);
     }
 
-    modifier expectsUnstakingSettlement() override { _; }
-    modifier expectsStakingRewards() override { _; }
+    modifier expectsRewards() override { _; }
 
     function _totalEquity(bool) internal view override returns (uint256) {
         return address(this).balance; // harmless stub for completeness
@@ -503,6 +501,45 @@ contract PrecompileHelpersTest is Test {
         assertEq(uint256(sent), available, "sent amount capped by balance");
         assertEq(MockMonadStaking(STAKING_ADDR).externalRewardCalls(), 1, "one call");
         assertEq(MockMonadStaking(STAKING_ADDR).lastValue(), available, "msg.value forwarded exactly");
+    }
+
+    // Scenario: Rewards above the precompile's per-call cap are split into multiple externalReward calls.
+    // Steps:
+    // 1) Fund the harness with a value exceeding MAX_EXTERNAL_REWARD.
+    // 2) Call `_sendRewards` and verify it succeeds while issuing multiple precompile calls.
+    // 3) Confirm the final chunk equals the remainder after full-cap chunks.
+    function test_sendRewards_SplitsWhenAboveExternalRewardCap() public {
+        uint64 valId = 77;
+
+        uint256 chunk = MAX_EXTERNAL_REWARD;
+        uint256 remainder = chunk / 4;
+        uint256 total = chunk * 2 + remainder;
+
+        vm.deal(address(harness), total);
+        MockMonadStaking(STAKING_ADDR).setExternalRewardBehavior(true, false);
+
+        (bool ok, uint120 sent) = harness.call_sendRewards(valId, uint128(total));
+
+        assertTrue(ok, "sendRewards should succeed when split");
+        assertEq(uint256(sent), total, "full amount should be forwarded across chunks");
+        assertEq(MockMonadStaking(STAKING_ADDR).externalRewardCalls(), 3, "must emit one call per chunk");
+        assertEq(MockMonadStaking(STAKING_ADDR).lastValue(), remainder, "last call value must equal remainder");
+    }
+
+    // Scenario: We always attempt the first send even if gas is already below the crank limit,
+    // then stop after that send when gas is low.
+    function test_sendRewards_FirstSendEvenWhenGasBelowLimit() public {
+        uint64 valId = 88;
+        uint256 total = MAX_EXTERNAL_REWARD * 2 + MIN_VALIDATOR_DEPOSIT;
+
+        vm.deal(address(harness), total);
+        MockMonadStaking(STAKING_ADDR).setExternalRewardBehavior(true, false);
+
+        (bool ok, uint120 sent) = harness.call_sendRewards{ gas: 500_000 }(valId, uint128(total));
+
+        assertTrue(ok, "should still perform initial send");
+        assertEq(uint256(sent), MAX_EXTERNAL_REWARD, "only first chunk sent when gas is under limit");
+        assertEq(MockMonadStaking(STAKING_ADDR).externalRewardCalls(), 1, "only one externalReward call expected");
     }
 
     // Scenario: Epoch helpers mirror the precompile view and adjust for delay periods.
