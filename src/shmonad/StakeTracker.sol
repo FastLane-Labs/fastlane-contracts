@@ -40,8 +40,11 @@ import {
     LAST_VAL_ID,
     FIRST_VAL_ID,
     SLASHING_FREEZE_THRESHOLD,
+    MAX_EXTERNAL_REWARD,
     OWNER_COMMISSION_ACCOUNT,
-    COINBASE_PROCESS_GAS_LIMIT
+    COINBASE_PROCESS_GAS_LIMIT,
+    VALIDATOR_CRANK_LIMIT,
+    COINBASE_HANDLE_MEV_GAS_LIMIT
 } from "./Constants.sol";
 
 import { AccountingLib } from "./libraries/AccountingLib.sol";
@@ -68,6 +71,15 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @notice Initializes the StakeTracker contract with initial state and validator setup
     /// @dev Sets up the initial epoch structure, registers placeholder validators, and initializes global state
     function __StakeTracker_init() internal {
+        // For adding s_globalPendingLast and s_globalCapitalLast mid-epoch
+        if (!s_globalPendingLast.alwaysTrue) {
+            StakingEscrow memory _pendingStaking = s_globalPending;
+            _pendingStaking.alwaysTrue = true;
+            s_globalPendingLast = _pendingStaking;
+            WorkingCapital memory _globalCapital = s_globalCapital;
+            s_globalCapitalLast = _globalCapital;
+        }
+
         if (globalEpochPtr_N(0).epoch != 0) return;
 
         if (s_admin.internalEpoch == 0) {
@@ -92,7 +104,7 @@ abstract contract StakeTracker is ValidatorRegistry {
             // NOTE: They will diverge over time.
             s_admin.internalEpoch = _currentEpoch;
 
-            globalEpochPtr_N(-2).epoch = _currentEpoch < 3 ? 0 : _currentEpoch - 3;
+            globalEpochPtr_N(-3).epoch = _currentEpoch < 3 ? 0 : _currentEpoch - 3;
             globalEpochPtr_N(-2).epoch = _currentEpoch < 2 ? 0 : _currentEpoch - 2;
             globalEpochPtr_N(-1).epoch = _currentEpoch < 1 ? 0 : _currentEpoch - 1;
             globalEpochPtr_N(0).epoch = _currentEpoch;
@@ -195,9 +207,11 @@ abstract contract StakeTracker is ValidatorRegistry {
 
     /// @notice Single public entrypoint to advance global + per-validator state
     /// Can be called by anyone, timing does not affect the outcome.
-    /// @dev Processes global epoch advancement and validator state updates
+    /// @dev Processes global epoch advancement and validator state updates. `nonReentrant` blocks
+    /// coinbase/commission callbacks from reentering while rewards and balances are being settled.
     /// @return complete True if all cranking operations completed successfully
-    function crank() public notWhenFrozen returns (bool complete) {
+    /// @custom:selector 0x9c16a9e8
+    function crank() public notWhenFrozen nonReentrant returns (bool complete) {
         complete = _crankGlobal();
         if (!complete) {
             complete = _crankValidators();
@@ -208,10 +222,25 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @dev Iterates through validators and updates their state within gas limits
     /// @return allValidatorsCranked True if all validators were processed successfully
     function _crankValidators() internal returns (bool allValidatorsCranked) {
+        // If upgrading from a version without s_globalPendingLast and s_globalCapitalLast, seed the
+        // snapshot once so validatorsin the current round read a consistent cached view instead of
+        // live-mutating pending values.
+        if (!s_globalPendingLast.alwaysTrue) {
+            StakingEscrow memory _pending = s_globalPending;
+            _pending.alwaysTrue = true;
+            s_globalPendingLast = _pending;
+            WorkingCapital memory _globalCapital = s_globalCapital;
+            s_globalCapitalLast = _globalCapital;
+        }
+
+        // Keep the tracked monad epoch in sync if time advanced after the last global crank
+        uint64 _monadEpoch = _getEpochBarrierAdj();
+        if (globalEpochPtr_N(0).epoch < _monadEpoch) globalEpochPtr_N(0).epoch = _monadEpoch;
+
         uint64 _nextValidatorToCrank = s_nextValidatorToCrank;
 
         // TODO: calculate the actual gas needed per validator crank
-        while (gasleft() > 1_000_000) {
+        while (gasleft() > VALIDATOR_CRANK_LIMIT) {
             if (_nextValidatorToCrank == LAST_VAL_ID) break;
             t_validatorActiveSetCheckValId = 0;
             _crankValidator(_nextValidatorToCrank);
@@ -254,20 +283,24 @@ abstract contract StakeTracker is ValidatorRegistry {
         _primeNextGlobalEpoch(_epochThatJustEnded);
 
         // Prepare the upcoming epoch's data by zeroing out any previous values and setting any carryovers.
+        // NOTE: We clear N(+2) instead of N(+1) because _advanceEpochPointersAndResetValidatorCursor bumps
+        // s_admin.internalEpoch later in this function; the cleared slot becomes N(+1) for the next crank cycle,
+        // ensuring the circular buffer slot is clean one epoch ahead without changing behavior.
         globalRevenuePtr_N(2).clear();
         globalCashFlowsPtr_N(2).clear();
 
+        // Adjust for any goodwill (unexpected donations) by adding them to the staking queue prior to netting
+        // against any outstanding liabilities
+        _applyGoodwillToStakeQueue();
+
         // Handle any net staking allocations to the reserved MON amount
         _offsetLiabilitiesWithDeposits();
-
-        // Adjust for any goodwill (unexpected donations)
-        _applyGoodwillToStakeQueue();
 
         // Update (if applicable) and adjust the global net cash flow (MON) for flows to the atomic unstaking pool,
         // while being sure to keep the utilization rate unchanged.
         _settleGlobalNetMONAgainstAtomicUnstaking();
 
-        // Calculate and carry forward the unstaking aount from the atomic unstaking pool
+        // Calculate and carry forward the unstaking amount from the atomic unstaking pool
         _carryOverAtomicUnstakeIntoQueue();
 
         // Net excess queue capacity, roll unassignable stake, and then roll any unnetted surpluses to the next epoch
@@ -276,6 +309,10 @@ abstract contract StakeTracker is ValidatorRegistry {
         _clampQueuesToCapacityOrRoll();
 
         _updateRevenueSmootherAfterEpochChange();
+
+        // Update s_globalPendingLast and s_globalCapitalLast with the current values from storage
+        s_globalPendingLast = s_globalPending;
+        s_globalCapitalLast = s_globalCapital;
 
         _advanceEpochPointersAndResetValidatorCursor();
 
@@ -292,6 +329,8 @@ abstract contract StakeTracker is ValidatorRegistry {
         // Check for any outstanding liabilities
         uint256 _currentLiabilities = s_globalLiabilities.currentLiabilities();
         uint256 _reserves = s_globalCapital.reservedAmount;
+
+        // This occurs during the global crank, so use current s_globalPending
         uint256 _pendingUnstaking = s_globalPending.pendingUnstaking;
 
         if (_currentLiabilities > _reserves + _pendingUnstaking) {
@@ -332,14 +371,22 @@ abstract contract StakeTracker is ValidatorRegistry {
     }
 
     /// @notice Carries over atomic pool unstake amount into the global unstake queue for the current epoch.
+    /// @dev Settles distributedAmount against only the "available" portion of earnedRevenue. Revenue that
+    /// has already been earmarked via the shortfall path (tracked by allocatedRevenue) must not be reused
+    /// here, otherwise we would double-count that revenue—reducing distributedAmount and overstate atomic liquidity
+    /// which is calculated as (allocatedAmount - distributedAmount).
     function _carryOverAtomicUnstakeIntoQueue() internal {
-        // NOTE: We set this to globalRevenue.earnedRevenue so that there is no "jump" in the fee cost
-        // whenever we crank
-        uint120 _amountToSettle =
-            Math.min(globalRevenuePtr_N(0).earnedRevenue, s_atomicAssets.distributedAmount).toUint120();
+        Revenue memory _globalRevenue = globalRevenuePtr_N(0);
 
-        // NOTE: allocatedRevenue cannot exceed either earnedRevenue or distributedAmount.
-        globalRevenuePtr_N(0).allocatedRevenue = 0;
+        // Only settle against revenue that hasn't already been allocated via the shortfall path
+        // in _accountForWithdraw(). The shortfall path increments allocatedRevenue when it uses
+        // earnedRevenue to cover withdrawals that exceed allocatedAmount. Using the full earnedRevenue
+        // here would double-count that already-spent revenue.
+        uint256 _availableRevenue = uint256(_globalRevenue.earnedRevenue - _globalRevenue.allocatedRevenue);
+
+        // Settle the minimum of available revenue and what's been distributed (utilized).
+        // This ensures no "jump" in fee cost at crank time, matching the view function behavior.
+        uint120 _amountToSettle = Math.min(_availableRevenue, s_atomicAssets.distributedAmount).toUint120();
 
         s_atomicAssets.distributedAmount -= _amountToSettle; // -Contra_Asset Dr _amountToSettle
         // Implied: currentAssets -= _amountToSettle; // -Asset Cr _amountToSettle
@@ -433,17 +480,36 @@ abstract contract StakeTracker is ValidatorRegistry {
             }
         }
 
+        // If we've skipped a full monad epoch, we can process stake settlement early.
+        // NOTE: globalEpochPtr_N(-1).epoch gets updated during cranking to be the latest (highest) of the monad
+        // epoch (adjusted up if in barrier) of the last validator's crank. Tracking each validator individually
+        // would cost more gas in the 'happy path' than would be earned by the extra capital efficiency in the
+        // 'unhappy' (late crank) path.
+        bool _hasJumpedMonadEpochs = _getEpoch() > globalEpochPtr_N(-1).epoch + 1;
+
         _validatorEpochPtr = validatorEpochPtr_N(-1, valId);
-        if (!_validatorEpochPtr.crankedInBoundaryPeriod) {
-            // The staking initiated in epoch n-1 should be ready now as long as it wasn't cranked in a boundary period
+        if (!_validatorEpochPtr.crankedInBoundaryPeriod || _hasJumpedMonadEpochs) {
+            // The staking initiated in epoch n-1 should be ready now if an epoch was skipped OR if it wasn't cranked in
+            // a boundary period
             if (_validatorEpochPtr.hasDeposit) {
                 _handleCompleteIncreasedAllocation(_validatorEpochPtr, validatorPendingPtr_N(-1, valId));
+            }
+        }
+
+        if (!_validatorEpochPtr.crankedInBoundaryPeriod && _hasJumpedMonadEpochs) {
+            // The unstaking initiated in epoch n-1 should be ready if it didn't start in a boundary period AND if an
+            // epoch was skipped
+            if (_validatorEpochPtr.hasWithdrawal) {
+                _settleCompletedStakeAllocationDecrease(valId, _validatorEpochPtr, validatorPendingPtr_N(-1, valId));
             }
         }
     }
 
     /// @notice Computes per-validator stake delta using last windows and availability snapshots.
-    function _computeStakeDelta(uint64 validatorId)
+    function _computeStakeDelta(
+        uint64 validatorId,
+        uint256 validatorUnstakableAmount
+    )
         internal
         view
         returns (
@@ -454,22 +520,16 @@ abstract contract StakeTracker is ValidatorRegistry {
             uint256 stakeAllocationDecrease
         )
     {
-        uint256 _validatorUnstakableAmount = StakeAllocationLib.getValidatorAmountAvailableToUnstake(
-            validatorEpochPtr_N(-2, validatorId),
-            validatorEpochPtr_N(-1, validatorId),
-            validatorPendingPtr_N(-1, validatorId),
-            validatorPendingPtr_N(-2, validatorId)
-        );
-
         Epoch memory _validatorEpochLast = validatorEpochPtr_N(-1, validatorId);
 
         require(
-            _validatorUnstakableAmount <= uint256(_validatorEpochLast.targetStakeAmount),
-            ValidatorAvailableExceedsTargetStake(_validatorUnstakableAmount, _validatorEpochLast.targetStakeAmount)
+            validatorUnstakableAmount <= uint256(_validatorEpochLast.targetStakeAmount),
+            ValidatorAvailableExceedsTargetStake(validatorUnstakableAmount, _validatorEpochLast.targetStakeAmount)
         );
 
+        // This occurs during the validator crank, so use s_globalPendingLast and s_globalCapitalLast
         uint256 _globalUnstakableAmount =
-            StakeAllocationLib.getGlobalAmountAvailableToUnstake(s_globalCapital, s_globalPending);
+            StakeAllocationLib.getGlobalAmountAvailableToUnstake(s_globalCapitalLast, s_globalPendingLast);
 
         // Assume Validator is part of the active set to get the intended weights based on staking queue values
         (nextTarget, netAmount, isWithdrawal, stakeAllocationIncrease, stakeAllocationDecrease) = StakeAllocationLib
@@ -480,7 +540,7 @@ abstract contract StakeTracker is ValidatorRegistry {
             validatorRewardsPtr_N(-2, validatorId),
             validatorRewardsPtr_N(-1, validatorId),
             validatorEpochPtr_N(-1, validatorId),
-            _validatorUnstakableAmount,
+            validatorUnstakableAmount,
             _globalUnstakableAmount
         );
     }
@@ -517,6 +577,7 @@ abstract contract StakeTracker is ValidatorRegistry {
         // for the atomic unstaking pool deltas.
 
         // Get the available amounts and their respective queues
+        // This occurs during the global crank, so use current s_globalPending
         uint256 _globalUnstakableAmount =
             StakeAllocationLib.getGlobalAmountAvailableToUnstake(s_globalCapital, s_globalPending);
         uint256 _queuedForUnstakeAmount = globalCashFlowsPtr_N(0).queueForUnstake;
@@ -607,6 +668,8 @@ abstract contract StakeTracker is ValidatorRegistry {
             // Calculate and carry forward any unstakable amount that cannot be covered by the global unstakable assets
             // during the next epoch. This could occur when the majority of assets are stuck in staking escrow or
             // unstaking escrow.
+
+            // This occurs during the global crank, so use current s_globalPending
             uint256 _globalUnstakableAmount =
                 StakeAllocationLib.getGlobalAmountAvailableToUnstake(s_globalCapital, s_globalPending);
             uint256 _queuedForUnstakeAmount = globalCashFlowsPtr_N(0).queueForUnstake;
@@ -712,28 +775,37 @@ abstract contract StakeTracker is ValidatorRegistry {
 
         _advanceActiveSetFlags(_valId);
 
-        // Pull validator rewards (net of commission) so rebalancing reflects latest earnings.
+        // Compute the validator's unstakable amount prior to settling this epoch's cashflow
+        uint256 _validatorUnstakableAmount = StakeAllocationLib.getValidatorAmountAvailableToUnstakeSnapshot(
+            validatorEpochPtr_N(-1, _valId),
+            validatorEpochPtr_N(-2, _valId),
+            validatorPendingPtr_N(-1, _valId),
+            validatorPendingPtr_N(-2, _valId)
+        );
+
+        // Pull validator rewards (net of commission). Note: this updates earnedRevenue at offset 0,
+        // but stake allocation uses offsets -1 and -2, so it does not affect the upcoming rebalancing.
         _settleEarnedStakingYield(_valId);
 
         _settlePastEpochEdges(_valId);
 
         // Send any unsent rewardsPayable (i.e., MEV payments)
-        _settleValidatorRewardsPayable(_valId);
+        address _coinbase = _validatorCoinbase(_valId);
+        _settleValidatorRewardsPayable(_valId, _coinbase);
 
-        _handleStakeBalanceVerification(_valId, validatorEpochPtr_N(-1, _valId));
+        // NOTE: Each balance verification verifies the balances for the next epoch's crank; we do not need
+        // to adjust the unstakable amount in memory. If there is any unexpected deficit, subtract it from
+        // the unstakable amount.
+        uint256 _unexpectedDeficit = _handleStakeBalanceVerification(_valId, validatorEpochPtr_N(-1, _valId));
+        _validatorUnstakableAmount =
+            _validatorUnstakableAmount > _unexpectedDeficit ? _validatorUnstakableAmount - _unexpectedDeficit : 0;
 
         // Calculate and then handle the net staking / unstaking
         (uint128 _nextTargetStakeAmount, uint128 _netAmount, bool _isWithdrawal, uint256 _stakeAllocationIncrease,) =
-            _computeStakeDelta(_valId);
+            _computeStakeDelta(_valId, _validatorUnstakableAmount);
 
         // CASE: Validator was tagged as inactive for the cranked period
         if (!s_validatorData[_valId].isActive || _nextTargetStakeAmount < MIN_VALIDATOR_DEPOSIT) {
-            uint256 _validatorUnstakableAmount = StakeAllocationLib.getValidatorAmountAvailableToUnstake(
-                validatorEpochPtr_N(-2, _valId),
-                validatorEpochPtr_N(-1, _valId),
-                validatorPendingPtr_N(-1, _valId),
-                validatorPendingPtr_N(-2, _valId)
-            );
             // We're withdrawing _validatorUnstakableAmount, Roll forward any allocations that should've happened but
             // were blocked due to inactivity
             if (_stakeAllocationIncrease > 0) {
@@ -760,9 +832,8 @@ abstract contract StakeTracker is ValidatorRegistry {
         _rollValidatorEpochForwards(_valId, _nextTargetStakeAmount);
 
         // If coinbase is a contract, attempt to process it via a try/catch
-        address coinbase = _validatorCoinbase(_valId);
-        if (coinbase.code.length > 0) {
-            try ICoinbase(coinbase).process{ gas: COINBASE_PROCESS_GAS_LIMIT }() { } catch { }
+        if (_coinbase.code.length > 0 && _coinbase.balance > 0) {
+            _settleCoinbaseContract(_valId, _coinbase);
         }
     }
 
@@ -770,6 +841,7 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @dev Processes revenue attribution for unregistered validators
     function _crankPlaceholderValidator() internal {
         if (globalEpochPtr_N(-1).wasCranked) return;
+        globalEpochPtr_N(-1).wasCranked = true;
 
         emit UnregisteredValidatorRevenue(
             globalEpochPtr_N(-1).epoch,
@@ -777,7 +849,7 @@ abstract contract StakeTracker is ValidatorRegistry {
             uint256(validatorRewardsPtr_N(0, UNKNOWN_VAL_ID).earnedRevenue)
         );
 
-        // Set the placeholder validator as having been cranked via the global epoch
+        // Roll forward the placeholder validator's epoch storage
         _rollValidatorEpochForwards(UNKNOWN_VAL_ID, 0);
     }
 
@@ -801,6 +873,8 @@ abstract contract StakeTracker is ValidatorRegistry {
         validatorEpochPtr_N(0, valId).targetStakeAmount = newTargetStakeAmount;
 
         // Clear out the next next shmonad epoch's slots
+        // NOTE: Clearing N(+2) here means that after the global epoch pointer advances, this slot becomes N(+1)
+        // for the next validator crank, keeping the ring buffer pre-zeroed while preserving existing behavior.
         validatorRewardsPtr_N(2, valId).clear();
         validatorPendingPtr_N(2, valId).clear();
         _setEpochStorage(
@@ -950,7 +1024,7 @@ abstract contract StakeTracker is ValidatorRegistry {
                 valId, validatorEpochPtr, validatorPendingPtr, _amountReceived.toUint120()
             );
 
-            emit UnexpectedStakeSettlementError(coinbase, valId, _amountReceived, 1);
+            emit ValidatorUnstakeCompleted(valId, _amountReceived, validatorEpochPtr.withdrawalId);
         } else {
             _markValidatorNotInActiveSet(valId, 2);
 
@@ -974,21 +1048,54 @@ abstract contract StakeTracker is ValidatorRegistry {
 
     /// @notice Settles validator rewards payable (MEV payments *TO* a validator).
     /// @param valId The validator ID
-    function _settleValidatorRewardsPayable(uint64 valId) internal {
+    function _settleValidatorRewardsPayable(uint64 valId, address coinbase) internal {
         uint120 _validatorRewardsPayable = validatorRewardsPtr_N(-1, valId).rewardsPayable;
+        // Return early if there are no rewards to pay
+        if (_validatorRewardsPayable == 0) return;
+
+        // If validator is inactive (pending or completed deactivation), internalize the escrowed MEV
+        // as additional shMON yield. This is an intentional donation, not an error path.
+        if (!s_validatorData[valId].isActive) {
+            _handleRewardsRedirect(_validatorRewardsPayable);
+            emit InactiveValidatorRewardsRedirected(valId, _validatorRewardsPayable);
+            return;
+        }
+
+        // If coinbase contract is set up to process the validator rewards payable, send to it and
+        // process the external reward at the end of the validator crank (at same time as priority fees)
+        if (coinbase.code.length > 0 && address(this).balance >= _validatorRewardsPayable) {
+            if (_isNot7702Enabled(coinbase)) {
+                uint256 _grossMEVRewards = uint256(_validatorRewardsPayable);
+                try ICoinbase(coinbase).handleMEVPayable{
+                    gas: COINBASE_HANDLE_MEV_GAS_LIMIT,
+                    value: _validatorRewardsPayable
+                }() {
+                    _handleRewardsPaidSuccess(_validatorRewardsPayable);
+                    return;
+                } catch {
+                    // If payment via coinbase contract isn't successful, handle inside this function
+                    // pass
+                }
+            }
+        }
+
         if (_validatorRewardsPayable >= MIN_VALIDATOR_DEPOSIT) {
             // NOTE: if _sendRewards fails it means the validator is no longer a part of the active validator set
             (bool _success, uint120 _actualAmountSent) = _sendRewards(valId, _validatorRewardsPayable);
             if (_success) {
                 if (_actualAmountSent < _validatorRewardsPayable) {
-                    // NOTE: This frame is for testing - if it's triggered it signifies an underlying issue
-                    emit InsufficientLocalBalance(
-                        _validatorRewardsPayable, _actualAmountSent, address(this).balance, _totalEquity(false), 2
-                    );
-                    address coinbase = _validatorCoinbase(valId);
-                    emit UnexpectedValidatorRewardsPayError(
-                        coinbase, valId, _validatorRewardsPayable, address(this).balance, 1
-                    );
+                    if (_validatorRewardsPayable > MAX_EXTERNAL_REWARD) {
+                        emit PartialValidatorRewardsPayment(
+                            valId, _actualAmountSent, _validatorRewardsPayable, address(this).balance
+                        );
+                    } else {
+                        emit InsufficientLocalBalance(
+                            _validatorRewardsPayable, _actualAmountSent, address(this).balance, _totalEquity(false), 2
+                        );
+                        emit UnexpectedValidatorRewardsPayError(
+                            coinbase, valId, _validatorRewardsPayable, address(this).balance, 1
+                        );
+                    }
 
                     _handleRewardsPaidFail(valId, _validatorRewardsPayable - _actualAmountSent);
                     _handleRewardsPaidSuccess(_actualAmountSent);
@@ -996,7 +1103,6 @@ abstract contract StakeTracker is ValidatorRegistry {
                     _handleRewardsPaidSuccess(_validatorRewardsPayable);
                 }
             } else {
-                address coinbase = _validatorCoinbase(valId);
                 emit UnexpectedValidatorRewardsPayError(
                     coinbase, valId, _validatorRewardsPayable, address(this).balance, 2
                 );
@@ -1004,10 +1110,43 @@ abstract contract StakeTracker is ValidatorRegistry {
                 _markValidatorNotInActiveSet(valId, 3);
             }
         } else if (_validatorRewardsPayable > 0) {
-            address coinbase = _validatorCoinbase(valId);
             emit UnexpectedValidatorRewardsPayError(coinbase, valId, _validatorRewardsPayable, address(this).balance, 3);
             _handleRewardsPaidFail(valId, _validatorRewardsPayable);
         }
+    }
+
+    /// @notice Settles the coinbase contract of a validator - existence check is performed prior
+    /// @param valId The validator ID
+    function _settleCoinbaseContract(uint64 valId, address coinbaseContract) internal override expectsRewards {
+        if (_isNot7702Enabled(coinbaseContract)) {
+            // Track balance in order to allow validators to donate priority fees to boost yield.
+            uint256 _balance = address(this).balance;
+            try ICoinbase(coinbaseContract).process{ gas: COINBASE_PROCESS_GAS_LIMIT }() { } catch { }
+            uint256 _rewardAmount = address(this).balance - _balance;
+
+            if (_rewardAmount > 0) {
+                _handleValidatorRewards(valId, _rewardAmount, SCALE);
+            }
+        }
+    }
+
+    function _isNot7702Enabled(address coinbaseContract) internal returns (bool) {
+        // First, we must verify that the coinbase contract isn't an EOA that has been 7702-enabled
+        // NOTE: When adding non-contract coinbase addresses for a validator, it must be manually verified offchain
+        // that the coinbase is a wallet with a known private key and not an undeployed create2 smart contract.
+
+        bytes3 _coinbasePrefix;
+        // Assembly justification: need to read only the first 3 bytes of runtime code without allocating memory.
+        // Pseudocode: `_coinbasePrefix = bytes3(coinbaseContract.code[:3]);`
+        assembly ("memory-safe") {
+            let ptr := mload(0x40)
+            extcodecopy(coinbaseContract, ptr, 0, 3)
+            _coinbasePrefix := mload(ptr)
+            mstore(0x40, add(ptr, 0x20))
+        }
+
+        // 7702 EOAs have a code prefix of 0xef0100. If not 7702, process the coinbase contract
+        return _coinbasePrefix != 0xef0100;
     }
 
     /// @notice Handles stake allocation skip when amount is below dust threshold
@@ -1138,7 +1277,6 @@ abstract contract StakeTracker is ValidatorRegistry {
             // CASE: Staking initiated successfully
             if (_actualAmount < netAmount) {
                 // CASE: Staking initiated successfully but unable to initiate the intended amount
-                // NOTE: This frame is for testing - if it's triggered it signifies an underlying issue
                 emit InsufficientLocalBalance(netAmount, _actualAmount, address(this).balance, _totalEquity(false), 1);
 
                 // Reduce the nextTargetStakeAmount and the netAmount by the missing allocation and then
@@ -1196,7 +1334,7 @@ abstract contract StakeTracker is ValidatorRegistry {
         // Load the validator's data
         ValidatorData memory _vData = _getValidatorData(valId);
 
-        if (!_vData.isPlaceholder && _vData.inActiveSet_Current) {
+        if (!_vData.isPlaceholder && _vData.inActiveSet_Current && _vData.isActive) {
             // CASE: Validator is registered with FastLane - hold their MEV rewards (net of FastLane fee)
             // in escrow for them and pay them out next epoch.
             PendingBoost storage validatorRewardsPtr = validatorRewardsPtr_N(0, valId);
@@ -1263,7 +1401,7 @@ abstract contract StakeTracker is ValidatorRegistry {
 
         // Only increment global earned revenus if validator is not placeholder -
         // this is to prevent diluting real validators' proportional revenue-weighted allocations
-        if (!_vData.isPlaceholder && _vData.inActiveSet_Current) {
+        if (!_vData.isPlaceholder && _vData.inActiveSet_Current && _vData.isActive) {
             // CASE: Active, valid validator
             validatorRewardsPtr_N(0, _currentValId).earnedRevenue += _amount120;
             globalRevenuePtr_N(0).earnedRevenue += _amount120;
@@ -1304,7 +1442,7 @@ abstract contract StakeTracker is ValidatorRegistry {
 
         // Only increment global earned revenus if validator is not placeholder -
         // this is to prevent diluting real validators' proportional revenue-weighted allocations
-        if (!_vData.isPlaceholder && _vData.inActiveSet_Current) {
+        if (!_vData.isPlaceholder && _vData.inActiveSet_Current && _vData.isActive) {
             // CASE: Active, valid validator
             // We must clamp the amount added to revenue and then offset the appropriate buckets due to the
             // atomicUnstakingPool assuming all revenue is collected in MON.
@@ -1347,13 +1485,21 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @notice Verifies that expected staking balances match actual staking balances and then handles any discrepancies
     /// @param valId The validator ID in the Monad staking precompile
     /// @param validatorEpochPtrLast Storage pointer to validator's last epoch data
-    function _handleStakeBalanceVerification(uint64 valId, Epoch storage validatorEpochPtrLast) internal {
+    function _handleStakeBalanceVerification(
+        uint64 valId,
+        Epoch storage validatorEpochPtrLast
+    )
+        internal
+        returns (uint256 unexpectedDeficit)
+    {
         // Call the monad staking precompile to get the current balances staked with this validator
         (uint256 _actualActiveStake, uint256 _actualPendingDeposits) = _getStakeInfo(valId);
 
         // Declare variables and calculate expected values
         uint256 _expectedTotalStake = validatorEpochPtrLast.targetStakeAmount;
         uint256 _actualTotalStake = _actualActiveStake + _actualPendingDeposits;
+
+        unexpectedDeficit = _actualTotalStake < _expectedTotalStake ? _expectedTotalStake - _actualTotalStake : 0;
 
         uint256 _expectedPendingDeposits;
         uint256 _expectedPendingWithdrawals;
@@ -1416,7 +1562,7 @@ abstract contract StakeTracker is ValidatorRegistry {
             emit UnexpectedPendingStakeExceedsExpectedActive(
                 valId, s_admin.internalEpoch, _actualPendingDeposits, _expectedTotalStake
             );
-            return;
+            return unexpectedDeficit;
         }
 
         // Expected active is calculated by subtracting expected pending from expected total, so we subtract expected
@@ -1474,8 +1620,8 @@ abstract contract StakeTracker is ValidatorRegistry {
                         // staking, the circuit breaker thresholds can be reevaluated with bespoke logic.
                 }
 
-                // Convert to uint128 while checking for underflow
-                uint128 _delta128 = (_delta > _expectedTotalStake ? _delta - _expectedTotalStake : 0).toUint128();
+                // Convert to uint128 while capping at available stake to prevent underflow
+                uint128 _delta128 = Math.min(_delta, _expectedTotalStake).toUint128();
 
                 validatorEpochPtrLast.targetStakeAmount -= _delta128;
 
@@ -1483,6 +1629,7 @@ abstract contract StakeTracker is ValidatorRegistry {
                     // Implied equity -= _delta128; // -Equity Dr _delta
             }
         }
+        return unexpectedDeficit;
     }
 
     /// @notice Handles accounting of the initiation of increased stake allocation with a validator
@@ -1568,6 +1715,9 @@ abstract contract StakeTracker is ValidatorRegistry {
 
         uint120 _surplus;
 
+        // NOTE: On Monad, a delegator's undelegated balance can continue to accrue rewards during the withdrawal
+        // period. This often means `amount` received here exceeds `_expectedAmount`, and we intentionally treat
+        // that excess as additional staking yield for the validator below.
         // Reconcile the difference between expected and actual amount received.
         if (amount > _expectedAmount) {
             // CASE: Received more than expected
@@ -1620,15 +1770,35 @@ abstract contract StakeTracker is ValidatorRegistry {
                 s_globalCapital.reservedAmount += _shortfall.toUint128(); // +Asset Dr _shortfall
                     // Implied: currentAssets -= _shortfall // -Asset Cr _shortfall
 
+                _unqueuedAmount = _subtractNetToAtomicLiquidity(uint256(_unqueuedAmount) - _shortfall).toUint120();
+
                 // Queue the remainder to be staked
-                globalCashFlowsPtr_N(0).queueToStake += (_unqueuedAmount - _shortfall).toUint120();
+                globalCashFlowsPtr_N(0).queueToStake += _unqueuedAmount;
             }
         } else {
             // CASE: `_currentLiabilities` is already fully covered by `_reservedAssets`, so all received funds can be
             // queued to stake.
+            _unqueuedAmount = _subtractNetToAtomicLiquidity(_unqueuedAmount).toUint120();
 
             globalCashFlowsPtr_N(0).queueToStake += _unqueuedAmount;
         }
+    }
+
+    /// @notice Directs a portion of net cash inflows to replenish the liquidity in the atomic unstaking pool
+    /// @param debitAmount The amount of new MON
+    /// @return remainingDebitAmount The net amount of new MON after subtracting the portion allocated to atomic
+    /// unstaking
+    function _subtractNetToAtomicLiquidity(uint256 debitAmount) internal returns (uint256 remainingDebitAmount) {
+        uint256 _distributedAmount = s_atomicAssets.distributedAmount;
+        uint256 _netAmountToAtomicLiquidity = debitAmount * _scaledTargetLiquidityPercentage() / SCALE;
+
+        if (_netAmountToAtomicLiquidity > _distributedAmount) _netAmountToAtomicLiquidity = _distributedAmount;
+
+        s_atomicAssets.distributedAmount -= _netAmountToAtomicLiquidity.toUint128(); // -ContraAsset Dr
+            // _netAmountToAtomicLiquidity
+            // Implied: currentAssets -= _netAmountToAtomicLiquidity // -Asset Cr _netAmountToAtomicLiquidity
+
+        return debitAmount - _netAmountToAtomicLiquidity;
     }
 
     /// @notice Handles accounting of earned (realized and received) staking yield for a validator
@@ -1648,6 +1818,8 @@ abstract contract StakeTracker is ValidatorRegistry {
             // Track commission taken above by increasing the owner's zero-yield balance
             s_zeroYieldBalances[OWNER_COMMISSION_ACCOUNT] += _grossStakingCommission;
 
+            emit DepositToZeroYieldTranche(address(this), OWNER_COMMISSION_ACCOUNT, _grossStakingCommission);
+
             amount -= _grossStakingCommission;
         }
         // Validator MON -> ShMonad
@@ -1657,6 +1829,8 @@ abstract contract StakeTracker is ValidatorRegistry {
         globalRevenuePtr_N(0).earnedRevenue += amount;
 
         // Queue the rewards to be staked
+        // NOTE: We cannot send a portion to the atomic unstaking pool because it would potentially break the invariant
+        // "earnedRevenue >= queueToStake"
         globalCashFlowsPtr_N(0).queueToStake += (amount + _grossStakingCommission);
     }
 
@@ -1692,6 +1866,11 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @notice Reconciles atomic pool allocation/utilization with current state during global crank.
     /// @dev Preserves utilization continuity across cranks by proportionally adjusting `distributedAmount`
     /// and `allocatedAmount` to the new target, then books their effects into stake/unstake queues.
+    /// Note: When atomic pool rebalancing frees liquidity (allocatedAmount decreases or
+    /// distributedAmount increases), this function now first reserves that liquidity for any uncovered
+    /// liabilities (rewardsPayable + redemptionsPayable) before routing it to the staking queue.
+    /// This prevents the scenario where freed atomic liquidity bypasses liability coverage and gets
+    /// routed into staking, potentially leaving redemptions unfulfillable and MON permanently staked.
     function _settleGlobalNetMONAgainstAtomicUnstaking() internal {
         // Called during the Global crank
         // Get the current utilization rate - we want to make sure the utilization doesn't jump due to being cranked
@@ -1755,14 +1934,37 @@ abstract contract StakeTracker is ValidatorRegistry {
         // CASE: stake delta is positive - we need to stake more unstaked assets
         if (_stakeIn > _unstakeOut) {
             uint120 _netStakeIn = _stakeIn - _unstakeOut;
-            uint120 _currentQueueForUnstake = _globalCashFlows.queueForUnstake;
 
-            // First try to net the net stake in against the queueForUnstake
-            if (_netStakeIn > _globalCashFlows.queueForUnstake) {
-                _globalCashFlows.queueForUnstake -= _currentQueueForUnstake; // = 0
-                _globalCashFlows.queueToStake += (_netStakeIn - _currentQueueForUnstake);
-            } else {
-                _globalCashFlows.queueForUnstake -= _netStakeIn;
+            // Before routing freed liquidity to staking queue, check if liabilities need coverage.
+            // This ensures that when atomic pool shrinks (freeing currentAssets), those assets first satisfy
+            // any uncovered liabilities (rewardsPayable + redemptionsPayable) rather than being routed to staking.
+            // Without this check, freed liquidity could bypass liability coverage, leaving redemptions unfulfillable.
+            uint256 _currentLiabilities = s_globalLiabilities.currentLiabilities();
+            uint256 _reservedAssets = s_globalCapital.reservedAmount;
+            if (_currentLiabilities > _reservedAssets) {
+                // Calculate how much of the freed liquidity should go to reserves vs staking queue
+                uint256 _uncoveredLiabilities = _currentLiabilities - _reservedAssets;
+                uint120 _toReserves = _uncoveredLiabilities > _netStakeIn ? _netStakeIn : uint120(_uncoveredLiabilities);
+
+                // Route portion to reserves to cover liabilities first
+                s_globalCapital.reservedAmount += _toReserves;
+                // Implied: currentAssets -= _toReserves
+
+                // Reduce the amount available for queue netting/staking
+                _netStakeIn -= _toReserves;
+            }
+
+            // Continue with remaining _netStakeIn (may be 0 if all went to reserves)
+            if (_netStakeIn > 0) {
+                uint120 _currentQueueForUnstake = _globalCashFlows.queueForUnstake;
+
+                // First try to net the net stake in against the queueForUnstake
+                if (_netStakeIn > _currentQueueForUnstake) {
+                    _globalCashFlows.queueForUnstake = 0;
+                    _globalCashFlows.queueToStake += (_netStakeIn - _currentQueueForUnstake);
+                } else {
+                    _globalCashFlows.queueForUnstake -= _netStakeIn;
+                }
             }
 
             // CASE: stake delta is negative - we need to unstake more staked assets.
@@ -1841,6 +2043,37 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @notice Handles accounting for user deposits
     /// @param assets The deposit amount
     function _accountForDeposit(uint256 assets) internal virtual override {
+        uint256 _currentLiabilities = s_globalLiabilities.currentLiabilities();
+        uint256 _reservedAssets = s_globalCapital.reservedAmount;
+        uint256 _pendingUnstaking = s_globalPending.pendingUnstaking;
+
+        // NOTE: We include current assets in the calculation of uncovered liabilities because this happens
+        // in between cranks and net new deposits accrue to currentAssets prior to being cranked. Because
+        // this is a deposit, we must adjust for msg.value
+        uint256 _currentAssets = s_globalCapital.currentAssets(s_atomicAssets, address(this).balance - msg.value);
+
+        // Only send assets in excess of uncovered liabilities to atomic liquidity pool
+
+        // NOTE: We include _currentAssets in this check because those funds will also help cover
+        // liabilities during the crank. However, _uncoveredLiabilities below does NOT subtract
+        // _currentAssets because those are separate funds that will be applied independently.
+        // This means multiple deposits before a crank may collectively over-contribute to liability
+        // coverage, but this is conservative/safe behavior - excess just goes to staking.
+        if (_currentLiabilities > _reservedAssets + _pendingUnstaking + _currentAssets) {
+            // CASE: Some or all of the assets are needed to cover the liabilities
+            uint256 _uncoveredLiabilities = _currentLiabilities - (_reservedAssets + _pendingUnstaking);
+            if (assets > _uncoveredLiabilities) {
+                uint256 _surplus = assets - _uncoveredLiabilities;
+
+                // Send a portion of the surplus to atomic liquidity, then readd the uncovered liabilities
+                // to get the assets that need to be queued to stake.
+                assets = _uncoveredLiabilities + _subtractNetToAtomicLiquidity(_surplus);
+            }
+        } else {
+            // CASE: None of the assets are needed to cover liabilities
+            assets = _subtractNetToAtomicLiquidity(assets);
+        }
+
         // Queue up the necessary staking cranks with the debit entry
         globalCashFlowsPtr_N(0).queueToStake += assets.toUint120();
 
@@ -1876,12 +2109,23 @@ abstract contract StakeTracker is ValidatorRegistry {
 
     /// @notice Handles accounting of completion of unstake request
     /// @param amount The unstake completion amount
+    /// @dev The reservedAmount may include funds earmarked for validator rewards (rewardsPayable). We must not let
+    /// redemptions drain those funds, otherwise validator reward payments would underflow. We calculate
+    /// reservedForRedemptions by excluding rewardsPayable, and only use atomic liquidity to cover any shortfall beyond
+    /// that protected amount.
     function _beforeCompleteUnstake(uint128 amount) internal virtual override {
+        uint128 rewardsPayable = s_globalLiabilities.rewardsPayable;
         uint128 reservedAmount = s_globalCapital.reservedAmount;
-        if (reservedAmount < amount) {
-            // CASE: The reserved amount alone is not enough to meet the redemptions
-            // To get the missing amount, we remove it from the atomic liquidity pool.
-            uint128 _amountNeededFromAtomicLiquidity = amount - reservedAmount;
+
+        // Protect validator rewards from being drained by redemptions.
+        // The reservedAmount covers both rewardsPayable and redemptionsPayable.
+        // Only the portion exceeding rewardsPayable is available for redemptions.
+        uint128 reservedForRedemptions = reservedAmount > rewardsPayable ? reservedAmount - rewardsPayable : 0;
+
+        if (reservedForRedemptions < amount) {
+            // CASE: Reserved capital available for redemptions is insufficient; pull the shortfall
+            // from atomic liquidity. This preserves the validator rewards portion of reserves.
+            uint128 _amountNeededFromAtomicLiquidity = amount - reservedForRedemptions;
 
             AtomicCapital memory _atomicAssets = s_atomicAssets;
             uint128 _atomicAllocatedAmount = _atomicAssets.allocatedAmount;
@@ -1891,10 +2135,10 @@ abstract contract StakeTracker is ValidatorRegistry {
             require(
                 _atomicAllocatedAmount - Math.min(_atomicUtilizedAmount, _atomicAllocatedAmount)
                     >= _amountNeededFromAtomicLiquidity,
-                InsufficientReservedLiquidity(amount, reservedAmount)
+                InsufficientReservedLiquidity(amount, reservedForRedemptions)
             );
 
-            // Take the last bit of the withdrawal from the atomic liquidity pool by crediting the allocated asset,
+            // Take the shortfall from the atomic liquidity pool by crediting the allocated asset,
             // offset by debiting the reserved amount.
             s_atomicAssets.allocatedAmount -= _amountNeededFromAtomicLiquidity; // -Asset Cr
                 // _amountNeededFromAtomicLiquidity
@@ -1932,9 +2176,9 @@ abstract contract StakeTracker is ValidatorRegistry {
         // available for use by the atomic unstaking pool.
         uint256 _availableRevenue = uint256(_globalRevenue.earnedRevenue - _globalRevenue.allocatedRevenue);
 
-        // The _carryOverAtomicUnstakeIntoQueue() method will only settle a max amount of
-        // globalRevenuePtr_N(0).earnedRevenue during the global crank. This means that we can offset that
-        // future-settled amount here and avoid any sharp adjustments to the fee whenever we crank
+        // The _carryOverAtomicUnstakeIntoQueue() method settles a max amount of _availableRevenue
+        // (earnedRevenue - allocatedRevenue) during the global crank. This offset ensures fee math
+        // remains consistent before and after cranking.
         utilizedAmount -= Math.min(_availableRevenue, utilizedAmount).toUint128();
 
         return (utilizedAmount, allocatedAmount);
@@ -1959,10 +2203,9 @@ abstract contract StakeTracker is ValidatorRegistry {
         // available for use by the atomic unstaking pool.
         uint256 _availableRevenue = uint256(_globalRevenue.earnedRevenue - _globalRevenue.allocatedRevenue);
 
-        // The _carryOverAtomicUnstakeIntoQueue() method will only settle a max amount of
-        // globalRevenuePtr_N(0).earnedRevenue during the global crank, which also resets
-        // globalRevenuePtr_N(0).earnedRevenue to zero. This means that we can offset that
-        // future-settled amount here and avoid any sharp adjustments to the fee whenever we crank
+        // The _carryOverAtomicUnstakeIntoQueue() method settles a max amount of _availableRevenue
+        // (earnedRevenue - allocatedRevenue) during the global crank. This offset ensures fee math
+        // and liquidity previews remain consistent before and after cranking.
         _utilizedAmount -= Math.min(_availableRevenue, _utilizedAmount).toUint128();
 
         currentAvailableAmount = totalAllocatedAmount - _utilizedAmount;
@@ -2025,6 +2268,7 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @dev Ready when: contract not frozen, all validators cranked, and new epoch available. This is essentially a
     /// view function but cannot be declared as such because the Monad staking precompile absolutely hates when we call
     /// its function calls view or staticcall.
+    /// @custom:selector 0x9a292225
     function isGlobalCrankAvailable() external returns (bool) {
         if (globalEpochPtr_N(0).frozen) return false;
 
@@ -2033,6 +2277,7 @@ abstract contract StakeTracker is ValidatorRegistry {
 
     /// @notice Returns true if a specific validator can be cranked based on basic checks.
     /// @dev Ready when: contract not frozen, validatorId is valid and last epoch not cranked.
+    /// @custom:selector 0xf062f386
     function isValidatorCrankAvailable(uint64 validatorId) external view returns (bool) {
         if (globalEpochPtr_N(0).frozen) return false;
         if (validatorId == 0 || validatorId == UNKNOWN_VAL_ID) return false;
@@ -2044,6 +2289,7 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @notice Returns current working capital snapshot (no structs).
     /// @return stakedAmount Total staked amount
     /// @return reservedAmount Total reserved amount
+    /// @custom:selector 0x934c85d7
     function getWorkingCapital() external view returns (uint128 stakedAmount, uint128 reservedAmount) {
         WorkingCapital memory _workingCapital = s_globalCapital;
         return (_workingCapital.stakedAmount, _workingCapital.reservedAmount);
@@ -2052,6 +2298,7 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @notice Returns atomic capital snapshot (no structs).
     /// @return allocatedAmount Total allocated amount for atomic pool
     /// @return distributedAmount Amount already distributed to atomic unstakers
+    /// @custom:selector 0x0fb6215a
     function getAtomicCapital() external view returns (uint128 allocatedAmount, uint128 distributedAmount) {
         AtomicCapital memory _atomicCapital = s_atomicAssets;
         return (_atomicCapital.allocatedAmount, _atomicCapital.distributedAmount);
@@ -2060,8 +2307,18 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @notice Returns global pending escrow snapshot (no structs).
     /// @return pendingStaking Pending staking amount
     /// @return pendingUnstaking Pending unstaking amount
+    /// @custom:selector 0xba749daf
     function getGlobalPending() external view returns (uint120 pendingStaking, uint120 pendingUnstaking) {
         StakingEscrow memory _stakingEscrow = s_globalPending;
+        return (_stakingEscrow.pendingStaking, _stakingEscrow.pendingUnstaking);
+    }
+
+    /// @notice Returns global escrow snapshot for the last epoch (no structs).
+    /// @return pendingStaking Pending staking amount at the end of last epoch
+    /// @return pendingUnstaking Pending unstaking amount at the end of last epoch
+    /// @custom:selector 0x4c9dd95d
+    function getGlobalPendingLast() external view returns (uint120 pendingStaking, uint120 pendingUnstaking) {
+        StakingEscrow memory _stakingEscrow = s_globalPendingLast;
         return (_stakingEscrow.pendingStaking, _stakingEscrow.pendingUnstaking);
     }
 
@@ -2069,6 +2326,7 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @param epochPointer Epoch selector: -2=LastLast, -1=Last, 0=Current, 1=Next (others wrap modulo tracking)
     /// @return queueToStake Queue to stake for selected epoch
     /// @return queueForUnstake Queue for unstake for selected epoch
+    /// @custom:selector 0x1884fbda
     function getGlobalCashFlows(int256 epochPointer)
         external
         view
@@ -2082,6 +2340,7 @@ abstract contract StakeTracker is ValidatorRegistry {
     /// @param epochPointer Epoch selector: -2=LastLast, -1=Last, 0=Current, 1=Next (others wrap modulo tracking)
     /// @return allocatedRevenue Revenue that has been allocated to the atomic unstaking pool this epoch
     /// @return earnedRevenue Earned revenue for selected epoch
+    /// @custom:selector 0x08cd7fad
     function getGlobalRevenue(int256 epochPointer)
         external
         view
@@ -2093,6 +2352,7 @@ abstract contract StakeTracker is ValidatorRegistry {
 
     /// @notice Returns selected global epoch data (no structs).
     /// @param epochPointer Epoch selector: -2=LastLast, -1=Last, 0=Current, 1=Next (others wrap modulo tracking)
+    /// @custom:selector 0x2d6d6b97
     function getGlobalEpoch(int256 epochPointer)
         external
         view
@@ -2123,28 +2383,33 @@ abstract contract StakeTracker is ValidatorRegistry {
     }
 
     /// @notice Returns internal epoch counter used by StakeTracker.
+    /// @custom:selector 0x29bb317c
     function getInternalEpoch() external view returns (uint64) {
         return s_admin.internalEpoch;
     }
 
     /// @notice Returns selected epoch frozen/closed status convenience flags.
     /// @param epochPointer Epoch selector: -2=LastLast, -1=Last, 0=Current, 1=Next (others wrap modulo tracking)
+    /// @custom:selector 0x424567eb
     function getGlobalStatus(int256 epochPointer) external view returns (bool frozen, bool closed) {
         Epoch memory _epoch = globalEpochPtr_N(epochPointer);
         return (_epoch.frozen, _epoch.closed);
     }
 
     /// @notice Returns the current target liquidity percentage scaled to 1e18.
+    /// @custom:selector 0x6ec52fed
     function getScaledTargetLiquidityPercentage() external view returns (uint256) {
         return _scaledTargetLiquidityPercentage();
     }
 
     /// @notice Returns the global amount currently eligible to be unstaked.
+    /// @custom:selector 0x365520db
     function getGlobalAmountAvailableToUnstake() external view returns (uint256 amount) {
         return StakeAllocationLib.getGlobalAmountAvailableToUnstake(s_globalCapital, s_globalPending);
     }
 
     /// @notice Returns current-assets per AccountingLib.
+    /// @custom:selector 0xa250f825
     function getCurrentAssets() external view returns (uint256) {
         return s_globalCapital.currentAssets(s_atomicAssets, address(this).balance);
     }
@@ -2154,19 +2419,13 @@ abstract contract StakeTracker is ValidatorRegistry {
     // ================================================== //
     /// @notice Returns the Monad staking precompile interface
     /// @return IMonadStaking The staking precompile interface
+    /// @custom:selector 0x0cb9f3ad
     function STAKING_PRECOMPILE() public pure override(ValidatorRegistry) returns (IMonadStaking) {
         return STAKING;
     }
 
-    /// @notice Modifier that sets up transient capital for unstaking settlement
-    modifier expectsUnstakingSettlement() override {
-        _setTransientCapital(CashFlowType.AllocationReduction, 0);
-        _;
-        _clearTransientCapital();
-    }
-
-    /// @notice Modifier that sets up transient capital for rewards settlement
-    modifier expectsStakingRewards() override {
+    /// @notice Modifier that sets up transient capital for rewards delivered via receive()
+    modifier expectsRewards() override {
         _setTransientCapital(CashFlowType.Revenue, 0);
         _;
         _clearTransientCapital();

@@ -2,9 +2,28 @@
 pragma solidity >=0.8.28 <0.9.0;
 
 import { IMonadStaking } from "../interfaces/IMonadStaking.sol";
+import { Vm } from "forge-std/Vm.sol";
+import {
+    STAKING_GAS_DELEGATE,
+    STAKING_GAS_UNDELEGATE,
+    STAKING_GAS_WITHDRAW,
+    STAKING_GAS_CLAIM_REWARDS,
+    STAKING_GAS_EXTERNAL_REWARD
+} from "../Constants.sol";
 
 /// @notice Drop-in mock of the Monad staking precompile with near-native state tracking for tests.
 contract MockMonadStakingPrecompile is IMonadStaking {
+    Vm constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+
+    /// @dev Modifier to pause gas metering for mock functions.
+    /// @param gasCost Intended to simulate expected gas costs of the real precompile in the future.
+    ///                Currently unused as we simply pause metering to avoid OOG in heavy mock logic.
+    modifier customGasCost(uint256 gasCost) {
+        vm.pauseGasMetering();
+        _;
+        vm.resumeGasMetering();
+    }
+
     // ================================ //
     //             Errors               //
     // ================================ //
@@ -121,6 +140,7 @@ contract MockMonadStakingPrecompile is IMonadStaking {
     uint64 private s_epoch; // simulated epoch counter maintained via harness call
     bool private s_inEpochDelayPeriod; // mirrors boundary window flag from the host
     bool private s_forceWithdrawalNotReady; // harness flag to simulate boundary-induced delays
+    uint64 private s_stubbedProposerValId; // optional override for fork-mode tests
 
     mapping(uint64 => Validator) private s_validators; // valId => validator metadata
     mapping(bytes32 => uint64) private s_secpToValidator;
@@ -153,7 +173,10 @@ contract MockMonadStakingPrecompile is IMonadStaking {
     // ================================ //
 
     /// @notice Stubbed method for proposer ID. TODO: implement proposer selection logic in mock
+    /// @custom:selector 0xfbacb0be
     function getProposerValId() external override returns (uint64 val_id) {
+        uint64 stubbed = s_stubbedProposerValId;
+        if (stubbed != 0) return stubbed;
         return s_authToValidator[block.coinbase];
     }
 
@@ -213,7 +236,8 @@ contract MockMonadStakingPrecompile is IMonadStaking {
     }
 
     /// @notice Enforce dust guardrails and schedule the delegation for the proper activation epoch.
-    function delegate(uint64 valId) external payable override returns (bool) {
+    /// @custom:selector 0x84994fec
+    function delegate(uint64 valId) external payable override customGasCost(STAKING_GAS_DELEGATE) returns (bool) {
         uint256 amount = msg.value;
         if (amount == 0) {
             return true;
@@ -237,7 +261,17 @@ contract MockMonadStakingPrecompile is IMonadStaking {
     }
 
     /// @notice Sync rewards then stage a withdrawal request that unlocks after the delay period.
-    function undelegate(uint64 valId, uint256 amount, uint8 withdrawalId) external override returns (bool) {
+    /// @custom:selector 0x5cf41514
+    function undelegate(
+        uint64 valId,
+        uint256 amount,
+        uint8 withdrawalId
+    )
+        external
+        override
+        customGasCost(STAKING_GAS_UNDELEGATE)
+        returns (bool)
+    {
         Validator storage validator = _mustGetValidator(valId);
         DelegatorPosition storage position = s_delegators[valId][msg.sender];
         if (!position.exists) revert UnknownDelegator();
@@ -317,7 +351,16 @@ contract MockMonadStakingPrecompile is IMonadStaking {
     }
 
     /// @notice Honor the WITHDRAWAL_DELAY relative to block epochs before releasing funds.
-    function withdraw(uint64 valId, uint8 withdrawalId) external override returns (bool) {
+    /// @custom:selector 0xaed2ee73
+    function withdraw(
+        uint64 valId,
+        uint8 withdrawalId
+    )
+        external
+        override
+        customGasCost(STAKING_GAS_WITHDRAW)
+        returns (bool)
+    {
         WithdrawalRequestInternal storage request = s_withdrawals[valId][msg.sender][withdrawalId];
         if (!request.exists) revert UnknownWithdrawalId();
 
@@ -355,7 +398,8 @@ contract MockMonadStakingPrecompile is IMonadStaking {
     }
 
     /// @notice Payout accumulated rewards while keeping the validator accounting solvent.
-    function claimRewards(uint64 valId) external override returns (bool) {
+    /// @custom:selector 0xa76e2ca5
+    function claimRewards(uint64 valId) external override customGasCost(STAKING_GAS_CLAIM_REWARDS) returns (bool) {
         Validator storage validator = _mustGetValidator(valId);
         DelegatorPosition storage position = s_delegators[valId][msg.sender];
         if (!position.exists) revert UnknownDelegator();
@@ -392,7 +436,14 @@ contract MockMonadStakingPrecompile is IMonadStaking {
     }
 
     /// @notice Apply direct rewards coming from msg.value within the native bounds.
-    function externalReward(uint64 valId) external payable override returns (bool) {
+    /// @custom:selector 0xe4b3303b
+    function externalReward(uint64 valId)
+        external
+        payable
+        override
+        customGasCost(STAKING_GAS_EXTERNAL_REWARD)
+        returns (bool)
+    {
         uint256 reward = msg.value;
         if (reward < MON) revert ExternalRewardTooSmall();
         if (reward > MAX_EXTERNAL_REWARD) revert ExternalRewardTooLarge(); // native upper bound
@@ -423,6 +474,7 @@ contract MockMonadStakingPrecompile is IMonadStaking {
     // ================================ //
 
     /// @notice Return validator details mirroring the precompile tuple return shape.
+    /// @custom:selector 0x2b6d639a
     function getValidator(uint64 valId)
         external
         override
@@ -458,6 +510,7 @@ contract MockMonadStakingPrecompile is IMonadStaking {
     }
 
     /// @notice Surface delegator stake, reward debt, and scheduled activations.
+    /// @custom:selector 0x573c1ce0
     function getDelegator(
         uint64 valId,
         address delegator
@@ -549,6 +602,7 @@ contract MockMonadStakingPrecompile is IMonadStaking {
     }
 
     /// @notice Read the stored withdrawal request triple; returns zeros if slot unused.
+    /// @custom:selector 0x56fa2045
     function getWithdrawalRequest(
         uint64 valId,
         address delegator,
@@ -592,6 +646,7 @@ contract MockMonadStakingPrecompile is IMonadStaking {
         return _paginateValset(s_executionValset, startIndex);
     }
 
+    /// @custom:selector 0x757991a8
     function getEpoch() external override returns (uint64 epoch, bool inEpochDelayPeriod) {
         return (uint64(s_epoch + INITIAL_INTERNAL_EPOCH), s_inEpochDelayPeriod);
     }
@@ -673,6 +728,235 @@ contract MockMonadStakingPrecompile is IMonadStaking {
         uint256 epochStake = _thisEpochStake(validator);
         if (epochStake == 0) revert NotInValidatorSet();
         _applyReward(valId, validator, reward, true, epochStake);
+    }
+
+    struct ValidatorSeed {
+        uint64 valId;
+        address authAddress;
+        uint256 consensusStake;
+        uint256 consensusCommission;
+        uint256 snapshotStake;
+        uint256 snapshotCommission;
+        uint256 executionAccumulator;
+        uint256 executionUnclaimedRewards;
+        bytes secpPubkey;
+        bytes blsPubkey;
+    }
+
+    struct DelegatorSeed {
+        uint64 valId;
+        address delegator;
+        uint256 stake;
+        uint256 lastAccumulator;
+        uint256 rewards;
+        uint256 deltaStake;
+        uint256 nextDeltaStake;
+        uint64 deltaEpoch;
+        uint64 nextDeltaEpoch;
+    }
+
+    struct WithdrawalSeed {
+        uint64 valId;
+        address delegator;
+        uint8 withdrawalId;
+        uint256 amount;
+        uint256 accumulator;
+        uint64 epoch;
+    }
+
+    /// @notice Test hook to override the current proposer validator ID (fork-mode convenience).
+    function harnessSetProposerValId(uint64 valId) external {
+        s_stubbedProposerValId = valId;
+    }
+
+    /// @notice Test hook to set the external epoch/delay flag directly (fork-mode convenience).
+    /// @dev Accepts the external epoch returned by getEpoch(); internal storage subtracts INITIAL_INTERNAL_EPOCH.
+    function harnessSetEpoch(uint64 epoch, bool inDelayPeriod) external {
+        if (epoch < INITIAL_INTERNAL_EPOCH) revert InvalidInput();
+        s_epoch = epoch - INITIAL_INTERNAL_EPOCH;
+        s_inEpochDelayPeriod = inDelayPeriod;
+    }
+
+    /// @notice Bulk seed helper for validator views.
+    /// @dev Seeds minimal fields used by ShMonad; derived fields/valset membership are normalized in-place.
+    function harnessUpsertValidators(ValidatorSeed[] calldata seeds) external {
+        for (uint256 i = 0; i < seeds.length; i++) {
+            _harnessUpsertValidator(seeds[i]);
+        }
+    }
+
+    function harnessUpsertDelegators(DelegatorSeed[] calldata seeds) external {
+        for (uint256 i = 0; i < seeds.length; i++) {
+            _harnessUpsertDelegator(seeds[i]);
+        }
+    }
+
+    function harnessUpsertWithdrawals(WithdrawalSeed[] calldata seeds) external {
+        for (uint256 i = 0; i < seeds.length; i++) {
+            _harnessUpsertWithdrawal(seeds[i]);
+        }
+    }
+
+    /// @notice Bulk-load a snapshot emitted by `script/fork/snapshot_staking_precompile.py`.
+    /// @dev Snapshot format:
+    ///      `abi.encode(uint64 epoch, bool inDelay, ValidatorSeed[] validators, DelegatorSeed[] delegators,
+    /// WithdrawalSeed[] withdrawals)`.
+    ///      This helper is intended for fork-mode test harnesses where the precompile is missing in Foundry forks.
+    function harnessLoadSnapshot(bytes calldata snapshot) external {
+        (
+            uint64 epochExternal,
+            bool inDelay,
+            ValidatorSeed[] memory validators,
+            DelegatorSeed[] memory delegators,
+            WithdrawalSeed[] memory withdrawals
+        ) = abi.decode(snapshot, (uint64, bool, ValidatorSeed[], DelegatorSeed[], WithdrawalSeed[]));
+
+        if (epochExternal < INITIAL_INTERNAL_EPOCH) revert InvalidInput();
+        s_epoch = epochExternal - INITIAL_INTERNAL_EPOCH;
+        s_inEpochDelayPeriod = inDelay;
+
+        for (uint256 i = 0; i < validators.length; i++) {
+            _harnessUpsertValidator(validators[i]);
+        }
+        for (uint256 i = 0; i < delegators.length; i++) {
+            _harnessUpsertDelegator(delegators[i]);
+        }
+        for (uint256 i = 0; i < withdrawals.length; i++) {
+            _harnessUpsertWithdrawal(withdrawals[i]);
+        }
+
+        // Fork-mode hygiene:
+        // After seeding from a live network snapshot, we want any *newly registered* validators inside tests to use
+        // high-numbered IDs so they won't collide with existing chain validator IDs managed by ShMonad.
+        //
+        // This only affects future `registerValidator()` calls; it does not change any seeded validator IDs.
+        if (s_lastValId < 9999) s_lastValId = 9999;
+    }
+
+    function _harnessUpsertValidator(ValidatorSeed memory seed) internal {
+        uint64 valId = seed.valId;
+        if (valId == 0) revert InvalidInput();
+        if (seed.authAddress == address(0)) revert InvalidInput();
+
+        if (valId > s_lastValId) s_lastValId = valId;
+
+        Validator storage validator = s_validators[valId];
+        if (!validator.exists) {
+            validator.exists = true;
+            _addToExecutionValset(valId);
+        }
+
+        validator.authAddress = seed.authAddress;
+        validator.consensusStake = seed.consensusStake;
+        validator.snapshotStake = seed.snapshotStake;
+        validator.consensusCommission = seed.consensusCommission;
+        validator.snapshotCommission = seed.snapshotCommission;
+
+        // Execution view is used for reward math in the mock; keep it consistent enough for reads.
+        validator.activeStake = seed.consensusStake;
+        validator.executionStake = seed.consensusStake;
+        validator.executionCommission = seed.consensusCommission;
+        validator.executionAccumulator = seed.executionAccumulator;
+        validator.executionUnclaimedRewards = seed.executionUnclaimedRewards;
+        validator.secpPubkey = seed.secpPubkey;
+        validator.blsPubkey = seed.blsPubkey;
+
+        // Best-effort reverse lookup wiring (real chain may have duplicates; fork tests can stub proposer).
+        s_authToValidator[seed.authAddress] = valId;
+        if (seed.secpPubkey.length != 0) {
+            bytes32 secpHash = keccak256(seed.secpPubkey);
+            if (s_secpToValidator[secpHash] == 0) s_secpToValidator[secpHash] = valId;
+        }
+        if (seed.blsPubkey.length != 0) {
+            bytes32 blsHash = keccak256(seed.blsPubkey);
+            if (s_blsToValidator[blsHash] == 0) s_blsToValidator[blsHash] = valId;
+        }
+
+        // Derived flags and consensus valset membership.
+        validator.withdrawn = seed.consensusStake < MIN_VALIDATE_STAKE;
+        _updateConsensusMembership(valId);
+        _setSnapshotMembership(valId, seed.snapshotStake != 0);
+        _updateFlags(validator, valId);
+    }
+
+    function _harnessUpsertDelegator(DelegatorSeed memory seed) internal {
+        if (seed.delegator == address(0)) revert InvalidInput();
+        Validator storage validator = _mustGetValidator(seed.valId);
+
+        DelegatorPosition storage position = s_delegators[seed.valId][seed.delegator];
+        if (!position.exists) {
+            position.exists = true;
+            _addDelegatorLinks(seed.valId, seed.delegator);
+        }
+
+        position.stake = seed.stake;
+        position.lastAccumulator = seed.lastAccumulator;
+        position.rewards = seed.rewards;
+        position.deltaStake = seed.deltaStake;
+        position.nextDeltaStake = seed.nextDeltaStake;
+        position.deltaEpoch = _toInternalEpochOrZero(seed.deltaEpoch);
+        position.nextDeltaEpoch = _toInternalEpochOrZero(seed.nextDeltaEpoch);
+
+        // Seed future accumulator snapshots for any scheduled stake.
+        // Without this, `harnessSyscallOnEpochChange()` can underflow its refcount bookkeeping when it tries to
+        // activate scheduled stake via `_decrementFutureAccumulator`.
+        //
+        // Note: The mock only tracks one accumulator per (valId,epoch); this is consistent with how
+        // `_scheduleDelegation`
+        // records the accumulator at scheduling time.
+        if (position.deltaStake != 0 && position.deltaEpoch != 0) {
+            _incrementFutureAccumulator(seed.valId, position.deltaEpoch, validator.executionAccumulator);
+        }
+        if (position.nextDeltaStake != 0 && position.nextDeltaEpoch != 0) {
+            _incrementFutureAccumulator(seed.valId, position.nextDeltaEpoch, validator.executionAccumulator);
+        }
+
+        if (seed.delegator == validator.authAddress && validator.authAddress != address(0)) {
+            validator.withdrawn = _upcomingStake(position) < MIN_VALIDATE_STAKE;
+            _updateFlags(validator, seed.valId);
+        }
+    }
+
+    function _harnessUpsertWithdrawal(WithdrawalSeed memory seed) internal {
+        if (seed.delegator == address(0)) revert InvalidInput();
+        _mustGetValidator(seed.valId);
+
+        WithdrawalRequestInternal storage request = s_withdrawals[seed.valId][seed.delegator][seed.withdrawalId];
+        request.exists = true;
+        request.amount = seed.amount;
+        request.accumulator = seed.accumulator;
+        request.epoch = _toInternalEpochOrZero(seed.epoch);
+
+        // Ensure a corresponding accumulator snapshot exists so withdraw() won't revert on refcount underflow.
+        _incrementFutureAccumulator(seed.valId, request.epoch, request.accumulator);
+    }
+
+    function _toInternalEpochOrZero(uint64 externalEpoch) internal pure returns (uint64 internalEpoch) {
+        if (externalEpoch == 0) return 0;
+        if (externalEpoch < INITIAL_INTERNAL_EPOCH) revert InvalidInput();
+        return externalEpoch - INITIAL_INTERNAL_EPOCH;
+    }
+
+    function _setSnapshotMembership(uint64 valId, bool shouldBeInSet) internal {
+        uint256 idx = s_snapshotIndex[valId];
+        if (shouldBeInSet) {
+            if (idx == 0) {
+                s_snapshotIndex[valId] = s_snapshotValset.length + 1;
+                s_snapshotValset.push(valId);
+            }
+            return;
+        }
+
+        if (idx == 0) return;
+        uint256 arrayIndex = idx - 1;
+        uint256 lastIndex = s_snapshotValset.length - 1;
+        if (arrayIndex != lastIndex) {
+            uint64 replacement = s_snapshotValset[lastIndex];
+            s_snapshotValset[arrayIndex] = replacement;
+            s_snapshotIndex[replacement] = arrayIndex + 1;
+        }
+        s_snapshotValset.pop();
+        delete s_snapshotIndex[valId];
     }
 
     /// @notice Convenience getter that mirrors the runtime's internal lookup.

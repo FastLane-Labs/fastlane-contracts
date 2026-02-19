@@ -9,6 +9,8 @@ import {
     MIN_VALIDATOR_DEPOSIT,
     DUST_THRESHOLD,
     UNKNOWN_VAL_ID,
+    MAX_EXTERNAL_REWARD,
+    VALIDATOR_CRANK_LIMIT,
     STAKING_GAS_BUFFER,
     STAKING_GAS_CLAIM_REWARDS,
     STAKING_GAS_EXTERNAL_REWARD,
@@ -29,7 +31,7 @@ abstract contract PrecompileHelpers {
     // ================================================== //
 
     // We always pull rewards rather than compound them in a validator
-    function _claimRewards(uint64 valId) internal expectsStakingRewards returns (uint120 rewardAmount, bool success) {
+    function _claimRewards(uint64 valId) internal returns (uint120 rewardAmount, bool success) {
         uint256 _balance = address(this).balance;
         try STAKING_PRECOMPILE().claimRewards{ gas: STAKING_GAS_CLAIM_REWARDS + STAKING_GAS_BUFFER }(valId) returns (
             bool precompileSuccess
@@ -129,7 +131,6 @@ abstract contract PrecompileHelpers {
         uint8 withdrawalId
     )
         internal
-        expectsUnstakingSettlement
         returns (uint128 withdrawalAmount, bool success, bool delayed)
     {
         uint256 _balance = address(this).balance;
@@ -169,27 +170,44 @@ abstract contract PrecompileHelpers {
     }
 
     function _sendRewards(uint64 valId, uint128 rewardAmount) internal returns (bool success, uint120 amountSent) {
-        // This is for debugging
-        uint256 _amount = uint256(rewardAmount);
-        if (_amount > address(this).balance) {
-            _amount = address(this).balance;
+        uint256 _remaining = uint256(rewardAmount);
+
+        if (_remaining > address(this).balance) {
+            _remaining = address(this).balance;
         }
 
-        if (_amount >= MIN_VALIDATOR_DEPOSIT) {
+        if (_remaining < MIN_VALIDATOR_DEPOSIT) {
+            return (true, 0);
+        }
+
+        // Loop sends rewards in chunks of MAX_EXTERNAL_REWARD. We always attempt
+        // at least one send, then break early if gasleft() drops below
+        // VALIDATOR_CRANK_LIMIT to avoid OOG during validator cranks.
+        while (_remaining >= MIN_VALIDATOR_DEPOSIT) {
+            uint256 _amountToSend = _remaining > MAX_EXTERNAL_REWARD ? MAX_EXTERNAL_REWARD : _remaining;
+
             try STAKING_PRECOMPILE().externalReward{
-                value: _amount,
+                value: _amountToSend,
                 gas: STAKING_GAS_EXTERNAL_REWARD + STAKING_GAS_BUFFER
             }(valId) returns (bool precompileSuccess) {
                 if (!precompileSuccess) {
-                    return (false, 0);
+                    // Unreachable in production (precompile returns true or reverts), but keep this to preserve
+                    // partial-send accounting if a later iteration reports false after earlier chunks succeeded.
+                    return (amountSent > 0, amountSent);
                 }
-                return (true, uint120(_amount));
+                amountSent += _amountToSend.toUint120();
+                _remaining -= _amountToSend;
             } catch {
-                return (false, 0);
+                return (amountSent > 0, amountSent);
             }
-        } else {
-            return (true, 0);
+
+            // Attempt at least one send; thereafter bail out if we're low on gas to avoid cranking stalls.
+            if (_remaining < MIN_VALIDATOR_DEPOSIT) break;
+            if (gasleft() <= VALIDATOR_CRANK_LIMIT) break;
         }
+
+        // Return true so callers treat any unsent remainder as a partial payment to retry next epoch.
+        return (true, amountSent);
     }
 
     function _getStakeInfo(uint64 valId) internal returns (uint256 activeStake, uint256 pendingDeposits) {
@@ -273,10 +291,10 @@ abstract contract PrecompileHelpers {
     //                   Virtual Methods                  //
     // ================================================== //
 
+    /// @custom:selector 0x0cb9f3ad
     function STAKING_PRECOMPILE() public pure virtual returns (IMonadStaking);
 
-    modifier expectsUnstakingSettlement() virtual;
-    modifier expectsStakingRewards() virtual;
+    modifier expectsRewards() virtual;
 
     function _totalEquity(bool deductRecentRevenue) internal view virtual returns (uint256);
     function _validatorIdForCoinbase(address coinbase) internal view virtual returns (uint64);

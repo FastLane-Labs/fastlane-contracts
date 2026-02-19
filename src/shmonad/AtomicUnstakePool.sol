@@ -43,6 +43,7 @@ abstract contract AtomicUnstakePool is StakeTracker {
     // Fees are always enabled. To disable fees, set the fee curve to (0, 0)
     // via `setUnstakeFeeCurve(0, 0)`.
 
+    /// @custom:selector 0x9a7a039b
     function setPoolTargetLiquidityPercentage(uint256 newPercentageScaled) public virtual onlyOwner {
         require(newPercentageScaled <= SCALE, TargetLiquidityCannotExceed100Percent());
 
@@ -58,6 +59,7 @@ abstract contract AtomicUnstakePool is StakeTracker {
     /// - x is the pool utilization
     /// @param newSlopeRateRay slope a (RAY at u=1)
     /// @param newYInterceptRay intercept/base fee (RAY)
+    /// @custom:selector 0x4f8da2a7
     function setUnstakeFeeCurve(uint256 newSlopeRateRay, uint256 newYInterceptRay) external onlyOwner {
         require(newYInterceptRay <= RAY, YInterceptExceedsRay());
         require(newSlopeRateRay <= RAY, SlopeRateExceedsRay());
@@ -73,14 +75,17 @@ abstract contract AtomicUnstakePool is StakeTracker {
     //                  View Functions                    //
     // ================================================== //
 
+    /// @custom:selector 0x2a743e0a
     function yInterceptRay() public view returns (uint256) {
         return uint256(s_feeParams.cRay);
     }
 
+    /// @custom:selector 0xdf19afcf
     function slopeRateRay() public view returns (uint256) {
         return uint256(s_feeParams.mRay);
     }
 
+    /// @custom:selector 0xd813f074
     function getCurrentLiquidity() external view returns (uint256) {
         (uint256 _currentAvailableAmount, uint256 _totalAllocatedAmount) = _getLiquidityForAtomicUnstaking();
         // No allocation implies no withdrawable liquidity even if idle balance exists.
@@ -89,10 +94,12 @@ abstract contract AtomicUnstakePool is StakeTracker {
         return _currentAvailableAmount;
     }
 
+    /// @custom:selector 0x602f41d1
     function getTargetLiquidity() external view returns (uint256) {
         return _getTargetLiquidity();
     }
 
+    /// @custom:selector 0xc8a505f0
     function getPendingTargetLiquidity() external view returns (uint256) {
         uint256 _targetLiquidity = _getTargetLiquidity();
         uint256 _newScaledTargetPercent = s_pendingTargetAtomicLiquidityPercent;
@@ -106,6 +113,7 @@ abstract contract AtomicUnstakePool is StakeTracker {
         }
     }
 
+    /// @custom:selector 0xdb8a582b
     function getFeeCurveParams() external view returns (uint256 slopeRateRayOut, uint256 yInterceptRayOut) {
         slopeRateRayOut = s_feeParams.mRay;
         yInterceptRayOut = s_feeParams.cRay;
@@ -113,6 +121,7 @@ abstract contract AtomicUnstakePool is StakeTracker {
 
     /// @notice Current atomic pool utilization in 1e18 scale (0 to 1e18).
     /// @return utilizationWad Utilization scaled by 1e18
+    /// @custom:selector 0x8b5f6d52
     function getAtomicUtilizationWad() external view returns (uint256 utilizationWad) {
         (uint256 available, uint256 allocated) = _getLiquidityForAtomicUnstaking();
         if (allocated == 0) return 0;
@@ -122,6 +131,7 @@ abstract contract AtomicUnstakePool is StakeTracker {
 
     /// @notice Current marginal unstake fee rate (RAY) under y = min(c + m*u, c + m).
     /// @return feeRateRay Fee rate in RAY (1e27)
+    /// @custom:selector 0x7710d4ff
     function getCurrentUnstakeFeeRateRay() external view returns (uint256 feeRateRay) {
         (uint256 available, uint256 allocated) = _getLiquidityForAtomicUnstaking();
         if (allocated == 0) return uint256(s_feeParams.cRay) + uint256(s_feeParams.mRay); // capped full utilization
@@ -139,6 +149,7 @@ abstract contract AtomicUnstakePool is StakeTracker {
     /// @return allocated Total allocated (target) for atomic pool
     /// @return available Currently available liquidity
     /// @return utilizationWad Utilization scaled to 1e18
+    /// @custom:selector 0xe65f8087
     function getAtomicPoolUtilization()
         external
         view
@@ -156,8 +167,13 @@ abstract contract AtomicUnstakePool is StakeTracker {
     // ================================================== //
 
     // Forward (runtime): compute net from a gross budget; if that net exceeds liquidity R0,
-    // recompute at a NET cap (cap applies to what actually leaves the pool).
-    function _getGrossCappedAndFeeFromGrossAssets(uint256 grossRequested)
+    // recompute at a NET cap (cap applies to what actually leaves the pool). If the `revertIfNetExceedsLiquidity` param
+    // is set to `true`, it causes this function to revert if the net assets calculated will exceed the pool's available
+    // liquidity.
+    function _getGrossCappedAndFeeFromGrossAssets(
+        uint256 grossRequested,
+        bool revertIfNetExceedsLiquidity
+    )
         internal
         view
         override
@@ -172,9 +188,17 @@ abstract contract AtomicUnstakePool is StakeTracker {
             FeeLib.solveNetGivenGrossWithMinFee(grossRequested, R0, L, s_feeParams, ATOMIC_MIN_FEE_WEI);
 
         // If that net exceeds current liquidity, clamp by net and recalculate gross + fee exactly.
-        if (netOut > R0) {
+        bool netExceedsPoolLiquidity = netOut > R0;
+
+        if (netExceedsPoolLiquidity) {
+            // Conditional revert to prevent `agentWithdrawFromCommitted()` from resulting in insufficient net assets
+            // after burning a specified amount of shares, due to hitting the pool liquidity limits.
+            require(!revertIfNetExceedsLiquidity, InsufficientPoolLiquidity(netOut, R0));
+
             (grossCapped, feeAssets) = FeeLib.solveGrossGivenNetWithMinFee(R0, R0, L, s_feeParams, ATOMIC_MIN_FEE_WEI);
-            return (grossCapped, feeAssets); // implied net = R0 (since grossCapped - feeAssets == R0)
+
+            // implied net = R0 (since grossCapped - feeAssets == R0)
+            return (grossCapped, feeAssets);
         }
 
         // Otherwise we can spend the full grossRequested.

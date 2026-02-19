@@ -14,17 +14,24 @@ interface ICoinbase {
     //          Core Function           //
     // ================================ //
     function process() external returns (bool success);
+    function handleMEVPayable() external payable;
 
     // ================================ //
     //         onlyAuth Setters         //
     // ================================ //
-    function updateCommissionRate(uint256 newCommissionRate) external;
+    function updatePriorityCommissionRate(uint256 newCommissionRate) external;
+    function updateMEVCommissionRate(uint256 newCommissionRate) external;
     function updateCommissionRateFromStakingConfig() external;
+    function updateShMonadDonationRate(uint256 newDonationRate) external;
     function updateCommissionRecipient(address newRecipient) external;
+    function updateAuthAddress() external;
 
     // ================================ //
     //               Views              //
     // ================================ //
-    function getCommissionRate() external view returns (uint256);
+    function getPriorityCommissionRate() external view returns (uint256);
+    function getMEVCommissionRate() external view returns (uint256);
+    function getShMonadDonationRate() external view returns (uint256);
     function getCommissionRecipient() external view returns (address);
+    function getUnpaidBalances() external view returns (uint256 commission, uint256 rewards);
 }

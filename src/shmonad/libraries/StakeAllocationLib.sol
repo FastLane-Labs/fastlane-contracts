@@ -109,37 +109,16 @@ library StakeAllocationLib {
         return (targetValidatorStake, netAmount, isWithdrawal, stakeAllocationIncrease, stakeAllocationDecrease);
     }
 
-    /// @notice Computes full withdrawal delta for a deactivated validator.
-    /// @dev Returns a decrease equal to `amountAvailableToUnstake` and new target stake reduced by that amount.
-    /// @param validatorEpoch_Last Validator's last completed epoch view (current target reference).
-    /// @param amountAvailableToUnstake Liquid amount available to withdraw for the validator.
-    /// @return targetValidatorStake New target stake after decrease.
-    /// @return netAmount Absolute withdrawal amount.
-    /// @return isWithdrawal Always true for deactivated validators.
-    function calculateDeactivatedValidatorEpochStakeDelta(
+    /// @notice Returns per-validator amount that is was eligible to unstake at the end of last epoch.
+    /// @dev Snapshotted amount, corresponds with globalCapitalLast and doesnt change throughout an epoch.
+    /// @param validatorEpoch_Last Validator epoch at n-1.
+    /// @param validatorEpoch_LastLast Validator epoch at n-2.
+    /// @param validatorPendingEscrow_Last Pending escrow at n-1.
+    /// @param validatorPendingEscrow_LastLast Pending escrow at n-2.
+    /// @return amount Snapshot of end of last epoch's amount to unstake.
+    function getValidatorAmountAvailableToUnstakeSnapshot(
         Epoch memory validatorEpoch_Last,
-        uint256 amountAvailableToUnstake
-    )
-        internal
-        pure
-        returns (uint128 targetValidatorStake, uint128 netAmount, bool isWithdrawal)
-    {
-        netAmount = uint128(amountAvailableToUnstake);
-        targetValidatorStake = validatorEpoch_Last.targetStakeAmount - netAmount;
-        isWithdrawal = true;
-        return (targetValidatorStake, netAmount, isWithdrawal);
-    }
-
-    /// @notice Returns per-validator amount that is currently eligible to unstake.
-    /// @dev Excludes pending staking from last and (optionally) last-last epochs when relevant.
-    /// @param validatorEpoch_LastLast Validator epoch at n-1.
-    /// @param validatorEpoch_Last Validator epoch at n.
-    /// @param validatorPendingEscrow_Last Pending escrow at n.
-    /// @param validatorPendingEscrow_LastLast Pending escrow at n-1.
-    /// @return amount Eligible amount to unstake.
-    function getValidatorAmountAvailableToUnstake(
         Epoch memory validatorEpoch_LastLast,
-        Epoch memory validatorEpoch_Last,
         StakingEscrow memory validatorPendingEscrow_Last,
         StakingEscrow memory validatorPendingEscrow_LastLast
     )
@@ -160,12 +139,12 @@ library StakeAllocationLib {
 
     /// @notice Returns global amount currently eligible to unstake (excludes pending staking/unstaking).
     /// @dev total = staked; unavailable = pendingStaking + pendingUnstaking; amount = total - unavailable (saturating).
-    /// @param globalCapital_Rolling Working capital snapshot.
-    /// @param globalPending_Rolling Global pending escrow snapshot.
+    /// @param globalCapital Working capital snapshot.
+    /// @param globalPending Global pending escrow snapshot.
     /// @return amount Eligible global amount to unstake.
     function getGlobalAmountAvailableToUnstake(
-        WorkingCapital memory globalCapital_Rolling,
-        StakingEscrow memory globalPending_Rolling
+        WorkingCapital memory globalCapital,
+        StakingEscrow memory globalPending
     )
         internal
         pure
@@ -177,8 +156,8 @@ library StakeAllocationLib {
         // 3. Pending Unstaking MON
         // 4. Staked, Productive MON
         // All staked, productive MON is eligible to be unstaked, thus:
-        uint256 _total = globalCapital_Rolling.stakedAmount;
-        uint256 _unavailable = globalPending_Rolling.pendingStaking + globalPending_Rolling.pendingUnstaking;
+        uint256 _total = globalCapital.stakedAmount;
+        uint256 _unavailable = globalPending.pendingStaking + globalPending.pendingUnstaking;
         // NOTE: pendingStaking and pendingUnstaking are both considered a part of the total stakedAmount.
         amount = _saturatingSub(_total, _unavailable);
     }

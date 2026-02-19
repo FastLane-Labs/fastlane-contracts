@@ -21,54 +21,46 @@ import {
 } from "./Types.sol";
 import { MIN_TOP_UP_PERIOD_BLOCKS } from "./Constants.sol";
 
-/**
- * @title Policies - Core commit and uncommit actions relating to ShMonad policies
- * @author FastLane Labs
- * @dev Implements commitment mechanism for shMON shares to policies with agent-controlled operations
- *      and secure uncommitting with escrow periods. Uses an approval-based mechanism for uncommit completion.
- */
+/// @title Policies - Core commit and uncommit actions relating to ShMonad policies
+/// @author FastLane Labs
+/// @dev Implements commitment mechanism for shMON shares to policies with agent-controlled operations
+/// and secure uncommitting with escrow periods. Uses an approval-based mechanism for uncommit completion.
 abstract contract Policies is AtomicUnstakePool {
     using SafeTransferLib for address;
     using SafeCast for uint256;
 
-    /**
-     * @notice Initializes the Policies contract
-     */
+    /// @notice Initializes the Policies contract
     constructor() { }
 
     // --------------------------------------------- //
     //   Commit, RequestUncommit, CompleteUncommit   //
     // --------------------------------------------- //
 
-    /**
-     * @dev Commitment lifecycle:
-     * - Commit: Moves shares from uncommitted to committed under policy control
-     * - RequestUncommit: Starts escrow period defined by policy's escrowDuration
-     * - CompleteUncommit: After escrow, moves shares from uncommitting to uncommitted state
-     */
+    /// @dev Commitment lifecycle:
+    /// - Commit: Moves shares from uncommitted to committed under policy control
+    /// - RequestUncommit: Starts escrow period defined by policy's escrowDuration
+    /// - CompleteUncommit: After escrow, moves shares from uncommitting to uncommitted state
 
-    /**
-     * @notice Commits shMON shares to a specific policy.
-     * @dev Directly calls _commitToPolicy with msg.sender as the source. Always review the policy's escrow duration,
-     *      as extremely long escrows can make uncommitting effectively impossible.
-     * @param policyID The ID of the policy to commit into.
-     * @param commitRecipient The address that will own the committed shares.
-     * @param shares The amount of shMON shares to commit.
-     */
+    /// @notice Commits shMON shares to a specific policy.
+    /// @dev Directly calls _commitToPolicy with msg.sender as the source. Always review the policy's escrow duration,
+    /// as extremely long escrows can make uncommitting effectively impossible.
+    /// @param policyID The ID of the policy to commit into.
+    /// @param commitRecipient The address that will own the committed shares.
+    /// @param shares The amount of shMON shares to commit.
+    /// @custom:selector 0xf0881442
     function commit(uint64 policyID, address commitRecipient, uint256 shares) external onlyActivePolicy(policyID) {
         _commitToPolicy(policyID, msg.sender, commitRecipient, shares);
     }
 
-    /**
-     * @notice Deposits MON and commits the resulting shMON shares to a specific policy.
-     * @dev Combines deposit and commit for gas efficiency. Always review the policy's escrow duration before
-     *      committing, as extremely long escrows can make uncommitting effectively impossible.
-     * @param policyID The ID of the policy to commit shares to.
-     * @param sharesRecipient The address that will own the committed shares.
-     * @param sharesToCommit The number of shMON shares to commit (use type(uint256).max to commit all newly minted
-     *        shares).
-     * @return sharesMinted The amount of shMON shares minted (before any optional partial commit occurs).
-     */
+    /// @notice Deposits MON and commits the resulting shMON shares to a specific policy.
+    /// @dev Combines deposit and commit for gas efficiency. Always review the policy's escrow duration before
+    /// committing, as extremely long escrows can make uncommitting effectively impossible.
+    /// @param policyID The ID of the policy to commit shares to.
+    /// @param sharesRecipient The address that will own the committed shares.
+    /// @param sharesToCommit The number of shMON shares to commit (use type(uint256).max to commit all newly minted
+    /// shares).
+    /// @return sharesMinted The amount of shMON shares minted (before any optional partial commit occurs).
+    /// @custom:selector 0x9e1844c6
     function depositAndCommit(
         uint64 policyID,
         address sharesRecipient,
@@ -90,14 +82,13 @@ abstract contract Policies is AtomicUnstakePool {
         _commitToPolicy(policyID, msg.sender, sharesRecipient, sharesToCommit);
     }
 
-    /**
-     * @notice Requests uncommitment of shares from a policy, starting the escrow countdown before completion.
-     * @dev Delegates to _requestUncommitFromPolicy for the core accounting and event emission.
-     * @param policyID The ID of the policy to request uncommitment from.
-     * @param shares The amount of shMON shares to request uncommitment for.
-     * @param newMinBalance The new minimum committed balance to maintain for automatic top-ups.
-     * @return uncommitCompleteBlock The block number when the uncommitting period will be complete.
-     */
+    /// @notice Requests uncommitment of shares from a policy, starting the escrow countdown before completion.
+    /// @dev Delegates to _requestUncommitFromPolicy for the core accounting and event emission.
+    /// @param policyID The ID of the policy to request uncommitment from.
+    /// @param shares The amount of shMON shares to request uncommitment for.
+    /// @param newMinBalance The new minimum committed balance to maintain for automatic top-ups.
+    /// @return uncommitCompleteBlock The block number when the uncommitting period will be complete.
+    /// @custom:selector 0x417b7e51
     function requestUncommit(
         uint64 policyID,
         uint256 shares,
@@ -109,18 +100,17 @@ abstract contract Policies is AtomicUnstakePool {
         uncommitCompleteBlock = _requestUncommitFromPolicy(policyID, msg.sender, shares, newMinBalance);
     }
 
-    /**
-     * @notice Requests uncommitment and sets or updates an approval for a future completor.
-     * @dev Approval behavior accumulates share allowance and overwrites the completor address:
-     *      - Shares: adds the requested `shares` to the existing approval allowance for future completions.
-     *      - Completor: replaces the approved completor (use address(0) for an open approval).
-     *      - Infinite approval: `type(uint96).max` represents an unlimited share allowance.
-     * @param policyID The ID of the policy to request uncommitment from.
-     * @param shares The amount of shMON shares to uncommit (and add to the approval allowance).
-     * @param newMinBalance The new minimum committed balance to maintain.
-     * @param completor The address authorized to complete the uncommit (zero address allows anyone).
-     * @return uncommitCompleteBlock The block number when the uncommitting period will be complete.
-     */
+    /// @notice Requests uncommitment and sets or updates an approval for a future completor.
+    /// @dev Approval behavior accumulates share allowance and overwrites the completor address:
+    /// - Shares: adds the requested `shares` to the existing approval allowance for future completions.
+    /// - Completor: replaces the approved completor (use address(0) for an open approval).
+    /// - Infinite approval: `type(uint96).max` represents an unlimited share allowance.
+    /// @param policyID The ID of the policy to request uncommitment from.
+    /// @param shares The amount of shMON shares to uncommit (and add to the approval allowance).
+    /// @param newMinBalance The new minimum committed balance to maintain.
+    /// @param completor The address authorized to complete the uncommit (zero address allows anyone).
+    /// @return uncommitCompleteBlock The block number when the uncommitting period will be complete.
+    /// @custom:selector 0x67070c95
     function requestUncommitWithApprovedCompletor(
         uint64 policyID,
         uint256 shares,
@@ -145,15 +135,14 @@ abstract contract Policies is AtomicUnstakePool {
         emit UncommitApprovalUpdated(policyID, msg.sender, _uncommitApproval.completor, _uncommitApproval.shares);
     }
 
-    /**
-     * @notice Completes uncommitment of shares after escrow, honoring any outstanding approval.
-     * @dev Operates on the passed `account`'s balances (not the caller's) and enforces approval semantics:
-     *      - Completor: requires `msg.sender` to match the approved completor unless approval uses `address(0)`.
-     *      - Allowance: decreases the approved shares unless it is `type(uint96).max` (infinite).
-     * @param policyID The ID of the policy to complete uncommitment from.
-     * @param shares The amount of shMON shares to complete uncommitment for.
-     * @param account The address whose uncommitting will be completed and who receives the shares.
-     */
+    /// @notice Completes uncommitment of shares after escrow, honoring any outstanding approval.
+    /// @dev Operates on the passed `account`'s balances (not the caller's) and enforces approval semantics:
+    /// - Completor: requires `msg.sender` to match the approved completor unless approval uses `address(0)`.
+    /// - Allowance: decreases the approved shares unless it is `type(uint96).max` (infinite).
+    /// @param policyID The ID of the policy to complete uncommitment from.
+    /// @param shares The amount of shMON shares to complete uncommitment for.
+    /// @param account The address whose uncommitting will be completed and who receives the shares.
+    /// @custom:selector 0x4e4ed7fc
     function completeUncommitWithApproval(uint64 policyID, uint256 shares, address account) external {
         UncommitApproval memory _uncommitApproval = s_uncommitApprovals[policyID][account];
         // Operates on `account` balances, not caller's.
@@ -178,35 +167,32 @@ abstract contract Policies is AtomicUnstakePool {
         _completeUncommitFromPolicy(policyID, account, shares);
     }
 
-    /**
-     * @notice Completes uncommitment of shares after the escrow period finishes.
-     * @dev Thin wrapper around _completeUncommitFromPolicy with msg.sender as the beneficiary.
-     * @param policyID The ID of the policy to complete uncommitment from.
-     * @param shares The amount of shMON shares to complete uncommitment for.
-     */
+    /// @notice Completes uncommitment of shares after the escrow period finishes.
+    /// @dev Thin wrapper around _completeUncommitFromPolicy with msg.sender as the beneficiary.
+    /// @param policyID The ID of the policy to complete uncommitment from.
+    /// @param shares The amount of shMON shares to complete uncommitment for.
+    /// @custom:selector 0x6a610788
     function completeUncommit(uint64 policyID, uint256 shares) external {
         _completeUncommitFromPolicy(policyID, msg.sender, shares);
     }
 
-    /**
-     * @notice Completes uncommitment of shMON and immediately redeems the resulting shares for MON.
-     * @param policyID The ID of the policy from which to complete uncommitment of shMON.
-     * @param shares The amount of shMON to complete uncommitment for and then redeem for MON.
-     * @return assets The amount of MON redeemed for the given shMON shares.
-     */
+    /// @notice Completes uncommitment of shMON and immediately redeems the resulting shares for MON.
+    /// @param policyID The ID of the policy from which to complete uncommitment of shMON.
+    /// @param shares The amount of shMON to complete uncommitment for and then redeem for MON.
+    /// @return assets The amount of MON redeemed for the given shMON shares.
+    /// @custom:selector 0x3664f7af
     function completeUncommitAndRedeem(uint64 policyID, uint256 shares) external returns (uint256 assets) {
         _completeUncommitFromPolicy(policyID, msg.sender, shares);
         assets = redeem(shares, msg.sender, msg.sender);
     }
 
-    /**
-     * @notice Completes uncommitment of shMON from one policy and commits it into another policy in a single call.
-     * @dev Maintains total committed supply by recommitting immediately after completing the uncommitment.
-     * @param fromPolicyID The policy to complete uncommitment from.
-     * @param toPolicyID The policy to commit shares to.
-     * @param sharesRecipient The address that will own the recommitted shares.
-     * @param shares The amount of shMON shares to move between policies.
-     */
+    /// @notice Completes uncommitment of shMON from one policy and commits it into another policy in a single call.
+    /// @dev Maintains total committed supply by recommitting immediately after completing the uncommitment.
+    /// @param fromPolicyID The policy to complete uncommitment from.
+    /// @param toPolicyID The policy to commit shares to.
+    /// @param sharesRecipient The address that will own the recommitted shares.
+    /// @param shares The amount of shMON shares to move between policies.
+    /// @custom:selector 0x9eaeb31a
     function completeUncommitAndRecommit(
         uint64 fromPolicyID,
         uint64 toPolicyID,
@@ -223,14 +209,13 @@ abstract contract Policies is AtomicUnstakePool {
         _commitToPolicy(toPolicyID, msg.sender, sharesRecipient, shares);
     }
 
-    /**
-     * @notice Sets or overwrites the caller's uncommit approval for a policy.
-     * @dev Overrides any existing approval. Use `type(uint96).max` for infinite allowance and `address(0)` for an open
-     *      approval that allows anyone to complete the uncommitment.
-     * @param policyID The ID of the policy for which to configure approval.
-     * @param completor The address authorized to complete uncommitment (zero address allows anyone).
-     * @param shares The maximum shares that can be completed using this approval.
-     */
+    /// @notice Sets or overwrites the caller's uncommit approval for a policy.
+    /// @dev Overrides any existing approval. Use `type(uint96).max` for infinite allowance and `address(0)` for an open
+    /// approval that allows anyone to complete the uncommitment.
+    /// @param policyID The ID of the policy for which to configure approval.
+    /// @param completor The address authorized to complete uncommitment (zero address allows anyone).
+    /// @param shares The maximum shares that can be completed using this approval.
+    /// @custom:selector 0x55e69124
     function setUncommitApproval(uint64 policyID, address completor, uint256 shares) external {
         // Overrides any existing approval. For open approval set completor = address(0).
         // Use type(uint96).max to grant infinite allowance.
@@ -244,41 +229,38 @@ abstract contract Policies is AtomicUnstakePool {
     //           Top-Up Management Functions         //
     // --------------------------------------------- //
 
-    /**
-     * @dev Top-Up Mechanism Design:
-     *
-     * The top-up system automatically maintains a minimum committed balance, ensuring users
-     * always have sufficient committed shares available for policy operations:
-     *
-     * 1. Purpose:
-     *    - Ensures users can always cover operational costs via their committed balance
-     *    - Prevents accounts from becoming inoperable due to insufficient committed shares
-     *    - Allows users to set predictable limits on automatic recommitting
-     *
-     * 2. Parameters:
-     *    - minCommitted: The minimum balance to maintain in the committed state
-     *    - maxTopUpPerPeriod: Limit on how much can be automatically committed in a period
-     *    - topUpPeriodDuration: Time window controlling top-up frequency (in blocks)
-     *
-     * 3. Mechanism:
-     *    - When a user's committed balance falls below minCommitted, the system attempts to commit
-     *      more shares from their uncommitted balance
-     *    - Top-ups are capped by maxTopUpPerPeriod to prevent unexpected large transfers
-     *    - Each period resets the top-up counter, managing frequency of automatic committing
-     *
-     * 4. Integration:
-     *    - Top-up occurs automatically during _spendFromCommitted operations when needed
-     *    - Users can disable top-up by setting parameters to zero
-     */
+    /// @dev Top-Up Mechanism Design:
+    ///
+    /// The top-up system automatically maintains a minimum committed balance, ensuring users
+    /// always have sufficient committed shares available for policy operations:
+    ///
+    /// 1. Purpose:
+    /// - Ensures users can always cover operational costs via their committed balance
+    /// - Prevents accounts from becoming inoperable due to insufficient committed shares
+    /// - Allows users to set predictable limits on automatic recommitting
+    ///
+    /// 2. Parameters:
+    /// - minCommitted: The minimum balance to maintain in the committed state
+    /// - maxTopUpPerPeriod: Limit on how much can be automatically committed in a period
+    /// - topUpPeriodDuration: Time window controlling top-up frequency (in blocks)
+    ///
+    /// 3. Mechanism:
+    /// - When a user's committed balance falls below minCommitted, the system attempts to commit
+    /// more shares from their uncommitted balance
+    /// - Top-ups are capped by maxTopUpPerPeriod to prevent unexpected large transfers
+    /// - Each period resets the top-up counter, managing frequency of automatic committing
+    ///
+    /// 4. Integration:
+    /// - Top-up occurs automatically during _spendFromCommitted operations when needed
+    /// - Users can disable top-up by setting parameters to zero
 
-    /**
-     * @notice Sets the caller's minimum committed balance and automatic top-up settings for a policy.
-     * @dev Updates top-up settings in memory then persists to storage. Validates minimum period duration.
-     * @param policyID The ID of the policy whose thresholds are being updated.
-     * @param minCommitted The minimum committed balance to maintain.
-     * @param maxTopUpPerPeriod The maximum amount automatically recommitted per period.
-     * @param topUpPeriodDuration The duration of each top-up period in blocks.
-     */
+    /// @notice Sets the caller's minimum committed balance and automatic top-up settings for a policy.
+    /// @dev Updates top-up settings in memory then persists to storage. Validates minimum period duration.
+    /// @param policyID The ID of the policy whose thresholds are being updated.
+    /// @param minCommitted The minimum committed balance to maintain.
+    /// @param maxTopUpPerPeriod The maximum amount automatically recommitted per period.
+    /// @param topUpPeriodDuration The duration of each top-up period in blocks.
+    /// @custom:selector 0x9b5e7cf2
     function setMinCommittedBalance(
         uint64 policyID,
         uint128 minCommitted,
@@ -314,20 +296,18 @@ abstract contract Policies is AtomicUnstakePool {
     //           Policy Management Functions         //
     // --------------------------------------------- //
 
-    /**
-     * @dev Policies organize committed shares:
-     * - Each has unique ID, configuration, and authorized agents
-     * - Balances tracked per-user per-policy
-     * - Agents perform operations on committed shares
-     * - Policies can be disabled to prevent new commitments
-     */
+    /// @dev Policies organize committed shares:
+    /// - Each has unique ID, configuration, and authorized agents
+    /// - Balances tracked per-user per-policy
+    /// - Agents perform operations on committed shares
+    /// - Policies can be disabled to prevent new commitments
 
-    /**
-     * @notice Creates a new policy with the specified escrow duration.
-     * @dev Adds the caller as the first policy agent.
-     * @param escrowDuration The duration in blocks that uncommitting must wait before completion (<= type(uint48).max).
-     * @return policyID The ID of the newly created policy.
-     */
+    /// @notice Creates a new policy with the specified escrow duration.
+    /// @dev Adds the caller as the first policy agent.
+    /// @param escrowDuration The duration in blocks that uncommitting must wait before completion (<=
+    /// type(uint48).max).
+    /// @return policyID The ID of the newly created policy.
+    /// @custom:selector 0x321677f2
     function createPolicy(uint48 escrowDuration) external returns (uint64 policyID) {
         policyID = ++s_policyCount; // First policyID is 1
         s_policies[policyID] = Policy(escrowDuration, true, msg.sender);
@@ -336,35 +316,32 @@ abstract contract Policies is AtomicUnstakePool {
         emit CreatePolicy(policyID, msg.sender, escrowDuration);
     }
 
-    /**
-     * @notice Adds a policy agent to the specified policy.
-     * @dev Only callable by the contract owner; delegates to the internal _addPolicyAgent helper.
-     * @param policyID The ID of the policy.
-     * @param agent The address of the agent to add.
-     */
+    /// @notice Adds a policy agent to the specified policy.
+    /// @dev Only callable by the contract owner; delegates to the internal _addPolicyAgent helper.
+    /// @param policyID The ID of the policy.
+    /// @param agent The address of the agent to add.
+    /// @custom:selector 0x462fff96
     function addPolicyAgent(uint64 policyID, address agent) external onlyOwner {
         _addPolicyAgent(policyID, agent);
 
         emit AddPolicyAgent(policyID, agent);
     }
 
-    /**
-     * @notice Removes a policy agent from the specified policy.
-     * @dev Only callable by the contract owner; delegates to the internal _removePolicyAgent helper.
-     * @param policyID The ID of the policy.
-     * @param agent The address of the agent to remove.
-     */
+    /// @notice Removes a policy agent from the specified policy.
+    /// @dev Only callable by the contract owner; delegates to the internal _removePolicyAgent helper.
+    /// @param policyID The ID of the policy.
+    /// @param agent The address of the agent to remove.
+    /// @custom:selector 0x13788fe5
     function removePolicyAgent(uint64 policyID, address agent) external onlyOwner {
         _removePolicyAgent(policyID, agent);
 
         emit RemovePolicyAgent(policyID, agent);
     }
 
-    /**
-     * @notice Disables a policy, blocking new commitments but still allowing uncommitting.
-     * @dev Only callable by a policy agent. This action is irreversible and policies cannot be re-enabled.
-     * @param policyID The ID of the policy to disable.
-     */
+    /// @notice Disables a policy, blocking new commitments but still allowing uncommitting.
+    /// @dev Only callable by a policy agent. This action is irreversible and policies cannot be re-enabled.
+    /// @param policyID The ID of the policy to disable.
+    /// @custom:selector 0x4d28a646
     function disablePolicy(uint64 policyID) external onlyPolicyAgentAndActive(policyID) {
         s_policies[policyID].active = false;
 
@@ -375,24 +352,22 @@ abstract contract Policies is AtomicUnstakePool {
     //                  View Functions               //
     // --------------------------------------------- //
 
-    /**
-     * @notice Gets the block number when uncommitting will be complete for an account in a policy.
-     * @param policyID The ID of the policy to inspect.
-     * @param account The address whose uncommitting schedule is being queried.
-     * @return The block number when uncommitting will be complete.
-     */
+    /// @notice Gets the block number when uncommitting will be complete for an account in a policy.
+    /// @param policyID The ID of the policy to inspect.
+    /// @param account The address whose uncommitting schedule is being queried.
+    /// @return The block number when uncommitting will be complete.
+    /// @custom:selector 0x822c6d6d
     function uncommittingCompleteBlock(uint64 policyID, address account) external view returns (uint256) {
         return s_uncommittingData[policyID][account].uncommitStartBlock + s_policies[policyID].escrowDuration;
     }
 
-    /**
-     * @notice Returns the maximum amount a policy agent could take from an account.
-     * @dev Calculated as committed - held + uncommitting + remaining top-up allowance.
-     * @param policyID The ID of the policy being queried.
-     * @param account The account whose balances are evaluated.
-     * @param inUnderlying Whether to express the result in MON (true) or shMON (false).
-     * @return balanceAvailable The amount available for agent operations.
-     */
+    /// @notice Returns the maximum amount a policy agent could take from an account.
+    /// @dev Calculated as committed - held + uncommitting + remaining top-up allowance.
+    /// @param policyID The ID of the policy being queried.
+    /// @param account The account whose balances are evaluated.
+    /// @param inUnderlying Whether to express the result in MON (true) or shMON (false).
+    /// @return balanceAvailable The amount available for agent operations.
+    /// @custom:selector 0x7d05b18e
     function policyBalanceAvailable(
         uint64 policyID,
         address account,
@@ -415,13 +390,12 @@ abstract contract Policies is AtomicUnstakePool {
         if (inUnderlying) balanceAvailable = previewRedeem(balanceAvailable);
     }
 
-    /**
-     * @notice Returns the amount currently available via automatic top-up for an account in a policy.
-     * @param policyID The ID of the policy being queried.
-     * @param account The account whose top-up allowance is evaluated.
-     * @param inUnderlying Whether to express the result in MON (true) or shMON (false).
-     * @return amountAvailable The amount that can still be auto-committed this period.
-     */
+    /// @notice Returns the amount currently available via automatic top-up for an account in a policy.
+    /// @param policyID The ID of the policy being queried.
+    /// @param account The account whose top-up allowance is evaluated.
+    /// @param inUnderlying Whether to express the result in MON (true) or shMON (false).
+    /// @return amountAvailable The amount that can still be auto-committed this period.
+    /// @custom:selector 0x97c76115
     function topUpAvailable(
         uint64 policyID,
         address account,
@@ -469,6 +443,7 @@ abstract contract Policies is AtomicUnstakePool {
     /// @notice Returns top-up settings for an account (no structs).
     /// @return maxTopUpPerPeriod Maximum top-up per period
     /// @return topUpPeriodDuration Duration of top-up period in blocks
+    /// @custom:selector 0x7bca5126
     function getTopUpSettings(
         uint64 policyID,
         address account
@@ -482,6 +457,7 @@ abstract contract Policies is AtomicUnstakePool {
     }
 
     /// @notice Returns committed data (committed amount and minCommitted threshold).
+    /// @custom:selector 0x584e3785
     function getCommittedData(
         uint64 policyID,
         address account
@@ -495,6 +471,7 @@ abstract contract Policies is AtomicUnstakePool {
     }
 
     /// @notice Returns uncommitting data (uncommitting amount and start block).
+    /// @custom:selector 0x67f6007c
     function getUncommittingData(
         uint64 policyID,
         address account
@@ -507,12 +484,11 @@ abstract contract Policies is AtomicUnstakePool {
         return (_uncommittingData.uncommitting, _uncommittingData.uncommitStartBlock);
     }
 
-    /**
-     * @notice Gets the uncommit approval settings for an account in a policy
-     * @param policyID The ID of the policy
-     * @param account The address to check
-     * @return approval The uncommit approval (completor and approved shares)
-     */
+    /// @notice Gets the uncommit approval settings for an account in a policy
+    /// @param policyID The ID of the policy
+    /// @param account The address to check
+    /// @return approval The uncommit approval (completor and approved shares)
+    /// @custom:selector 0x4cac8783
     function getUncommitApproval(
         uint64 policyID,
         address account
@@ -528,19 +504,17 @@ abstract contract Policies is AtomicUnstakePool {
     //                Internal Functions             //
     // --------------------------------------------- //
 
-    /**
-     * @dev Commits shares to a policy from one account to a recipient
-     * @param policyID The ID of the policy
-     * @param accountFrom The address providing the shares
-     * @param sharesRecipient The address receiving the committed shares
-     * @param shares The amount of shMON shares to commit
-     * @dev Implementation details:
-     * 1. Checks if accountFrom has sufficient uncommitted balance
-     * 2. If accountFrom != sharesRecipient, handles as a transfer + commit
-     * 3. If accountFrom == sharesRecipient, handles as a simple commit
-     * 4. Updates committed balance in the policy and total committed supply if requested
-     * 5. Emits Transfer event for cross-account transfers and Commit event in all cases
-     */
+    /// @dev Commits shares to a policy from one account to a recipient
+    /// @param policyID The ID of the policy
+    /// @param accountFrom The address providing the shares
+    /// @param sharesRecipient The address receiving the committed shares
+    /// @param shares The amount of shMON shares to commit
+    /// @dev Implementation details:
+    /// 1. Checks if accountFrom has sufficient uncommitted balance
+    /// 2. If accountFrom != sharesRecipient, handles as a transfer + commit
+    /// 3. If accountFrom == sharesRecipient, handles as a simple commit
+    /// 4. Updates committed balance in the policy and total committed supply if requested
+    /// 5. Emits Transfer event for cross-account transfers and Commit event in all cases
     function _commitToPolicy(uint64 policyID, address accountFrom, address sharesRecipient, uint256 shares) internal {
         Balance memory fromBalance = s_balances[accountFrom];
         uint128 shares128 = shares.toUint128();
@@ -556,8 +530,9 @@ abstract contract Policies is AtomicUnstakePool {
             recipientBalance.committed += shares128;
             s_balances[sharesRecipient] = recipientBalance;
 
-            // Same event as if transfer() was called
-            emit Transfer(accountFrom, sharesRecipient, shares);
+            // No Transfer(from, recipient) event. Instead the Transfer pattern is:
+            // - commit = Transfer(from, ShMonad)
+            // - completeUncommit = Transfer(ShMonad, recipient)
         } else {
             // from and recipient are the same --> effectively just a commit() action
             fromBalance.committed += shares128;
@@ -585,20 +560,18 @@ abstract contract Policies is AtomicUnstakePool {
         emit Transfer(accountFrom, address(this), shares);
     }
 
-    /**
-     * @dev Requests uncommitment of shares from a policy, starting the escrow period
-     * @param policyID The ID of the policy
-     * @param account The address uncommitting shares
-     * @param shares The amount of shMON shares to uncommit
-     * @param newMinBalance The new minimum balance for top-up settings
-     * @return uncommitCompleteBlock The block number when the uncommitting period will be complete
-     * @dev Implementation details:
-     * 1. Checks if account has sufficient unheld committed balance
-     * 2. Decreases account's committed balance and the total committed supply
-     * 3. Increases account's uncommitting balance and sets the uncommit start block
-     * 4. Updates the caller's minCommitted threshold to the new minimum balance
-     * 5. Calculates and returns the block when uncommitting will be complete
-     */
+    /// @dev Requests uncommitment of shares from a policy, starting the escrow period
+    /// @param policyID The ID of the policy
+    /// @param account The address uncommitting shares
+    /// @param shares The amount of shMON shares to uncommit
+    /// @param newMinBalance The new minimum balance for top-up settings
+    /// @return uncommitCompleteBlock The block number when the uncommitting period will be complete
+    /// @dev Implementation details:
+    /// 1. Checks if account has sufficient unheld committed balance
+    /// 2. Decreases account's committed balance and the total committed supply
+    /// 3. Increases account's uncommitting balance and sets the uncommit start block
+    /// 4. Updates the caller's minCommitted threshold to the new minimum balance
+    /// 5. Calculates and returns the block when uncommitting will be complete
     function _requestUncommitFromPolicy(
         uint64 policyID,
         address account,
@@ -646,23 +619,21 @@ abstract contract Policies is AtomicUnstakePool {
         emit RequestUncommit(policyID, account, shares, uncommitCompleteBlock);
     }
 
-    /**
-     * @dev Completes uncommitment after escrow period completion
-     * @param policyID The ID of the policy
-     * @param account The address completing uncommitment
-     * @param shares The amount of shMON shares to complete uncommitment for
-     * @dev Implementation details:
-     * 1. Checks if the uncommitting period is complete
-     * 2. Verifies account has sufficient uncommitting balance
-     * 3. Decreases account's uncommitting balance and increases their uncommitted balance
-     */
+    /// @dev Completes uncommitment after escrow period completion
+    /// @param policyID The ID of the policy
+    /// @param account The address completing uncommitment
+    /// @param shares The amount of shMON shares to complete uncommitment for
+    /// @dev Implementation details:
+    /// 1. Checks if the uncommitting period is complete
+    /// 2. Verifies account has sufficient uncommitting balance
+    /// 3. Decreases account's uncommitting balance and increases their uncommitted balance
     function _completeUncommitFromPolicy(uint64 policyID, address account, uint256 shares) internal {
         UncommittingData memory uncommittingData = s_uncommittingData[policyID][account];
         uint256 policyEscrowDuration = s_policies[policyID].escrowDuration;
         uint128 shares128 = shares.toUint128();
 
         require(
-            block.number > uncommittingData.uncommitStartBlock + policyEscrowDuration,
+            block.number >= uncommittingData.uncommitStartBlock + policyEscrowDuration,
             UncommittingPeriodIncomplete(uncommittingData.uncommitStartBlock + policyEscrowDuration)
         );
 
@@ -689,22 +660,20 @@ abstract contract Policies is AtomicUnstakePool {
         emit Transfer(address(this), account, shares);
     }
 
-    /**
-     * @dev Respects any holds on the account's committed balance and decreases it if sufficient after deducting holds.
-     * May attempt top-up if needed, then draws from uncommitting if necessary.
-     * @param committedData Memory struct containing the account's committed data
-     * @param policyID The ID of the policy
-     * @param account The address whose committed balance is being decreased
-     * @param shares The amount of shMON shares to spend
-     * @param out Whether to decrease the committedTotalSupply
-     * @dev Implementation details:
-     * 1. Calculates available funds after deducting holds
-     * 2. If insufficient funds, first try take from account's uncommitting balance
-     * 3. If still insufficient funds, attempt top-up from account's uncommitted balance
-     * 4. If still insufficient after trying uncommitting and top-up sources, reverts with InsufficientFunds error
-     * 5. Updates balances in memory structures (must be persisted to storage separately)
-     * 6. Decreases both committedTotalSupply and totalSupply, depending on the `out` parameter
-     */
+    /// @dev Respects any holds on the account's committed balance and decreases it if sufficient after deducting holds.
+    /// May attempt top-up if needed, then draws from uncommitting if necessary.
+    /// @param committedData Memory struct containing the account's committed data
+    /// @param policyID The ID of the policy
+    /// @param account The address whose committed balance is being decreased
+    /// @param shares The amount of shMON shares to spend
+    /// @param out Whether to decrease the committedTotalSupply
+    /// @dev Implementation details:
+    /// 1. Calculates available funds after deducting holds
+    /// 2. If insufficient funds, first try take from account's uncommitting balance
+    /// 3. If still insufficient funds, attempt top-up from account's uncommitted balance
+    /// 4. If still insufficient after trying uncommitting and top-up sources, reverts with InsufficientFunds error
+    /// 5. Updates balances in memory structures (must be persisted to storage separately)
+    /// 6. Decreases both committedTotalSupply and totalSupply, depending on the `out` parameter
     function _spendFromCommitted(
         CommittedData memory committedData,
         uint64 policyID,
@@ -718,19 +687,21 @@ abstract contract Policies is AtomicUnstakePool {
         uint128 held128 = _getHoldAmount(policyID, account).toUint128();
         uint128 fundsAvailable = committedData.committed - held128; // Initially just unheld committed balance
         uint128 newSharesCommitted; // Cumulative shares committed through the `_increaseTopUpSpend()` calls
+        uint256 minCommittedRequired = uint256(shares) + uint256(committedData.minCommitted);
 
         // If account's committed balance is insufficient, try make up the shortfall from other sources in this order:
         // 1) Uncommitting balance
         // 2) Uncommitted balance, if top-up is enabled
 
         // First, try take from uncommitting balance
-        if (fundsAvailable < shares + committedData.minCommitted) {
+        if (uint256(fundsAvailable) < minCommittedRequired) {
             // Load account's uncommitting data
             UncommittingData memory uncommittingData = s_uncommittingData[policyID][account];
 
             // Take the shortfall from uncommitting, up to a max of the account's total uncommitting balance
-            uint128 takenFromUncommitting =
-                uint128(Math.min(shares + committedData.minCommitted - fundsAvailable, uncommittingData.uncommitting));
+            uint128 takenFromUncommitting = Math.min(
+                minCommittedRequired - uint256(fundsAvailable), uint256(uncommittingData.uncommitting)
+            ).toUint128();
 
             // Decrease account's uncommitting balance
             uncommittingData.uncommitting -= takenFromUncommitting;
@@ -752,8 +723,9 @@ abstract contract Policies is AtomicUnstakePool {
         }
 
         // Second, if fundsAvailable is still insufficient, try top-up from uncommitted balance
-        if (fundsAvailable < shares + committedData.minCommitted) {
-            uint128 committedShortfall = shares + committedData.minCommitted - fundsAvailable;
+        if (uint256(fundsAvailable) < minCommittedRequired) {
+            uint128 committedShortfall =
+                Math.min(minCommittedRequired - uint256(fundsAvailable), uint256(type(uint128).max)).toUint128();
 
             // NOTE: will attempt to top up to user's minCommitted level in addition to any shortfall top-up
             newSharesCommitted += _tryTopUp(balance, committedData, policyID, account, committedShortfall);
@@ -897,30 +869,26 @@ abstract contract Policies is AtomicUnstakePool {
         return sharesCommitted;
     }
 
-    /**
-     * @dev Adds a policy agent to the specified policy
-     * @param policyID The ID of the policy
-     * @param agent The address of the agent to add
-     * @dev Implementation details:
-     * 1. Checks that the address is not already an agent for the policy
-     * 2. Sets the mapping flag and adds to the agents array
-     */
+    /// @dev Adds a policy agent to the specified policy
+    /// @param policyID The ID of the policy
+    /// @param agent The address of the agent to add
+    /// @dev Implementation details:
+    /// 1. Checks that the address is not already an agent for the policy
+    /// 2. Sets the mapping flag and adds to the agents array
     function _addPolicyAgent(uint64 policyID, address agent) internal {
         require(!_isPolicyAgent(policyID, agent), PolicyAgentAlreadyExists(policyID, agent));
         s_isPolicyAgent[policyID][agent] = true; // Set agent to true in isPolicyAgent mapping
         s_policyAgents[policyID].push(agent); // Add agent to policyAgents array
     }
 
-    /**
-     * @dev Removes a policy agent from the specified policy
-     * @param policyID The ID of the policy
-     * @param agent The address of the agent to remove
-     * @dev Implementation details:
-     * 1. Ensures the policy still has at least one agent after removal
-     * 2. Verifies the address is currently an agent
-     * 3. Sets the mapping flag to false and removes from the agents array
-     * 4. Replaces the removed agent with the last agent in the array and pops the array
-     */
+    /// @dev Removes a policy agent from the specified policy
+    /// @param policyID The ID of the policy
+    /// @param agent The address of the agent to remove
+    /// @dev Implementation details:
+    /// 1. Ensures the policy still has at least one agent after removal
+    /// 2. Verifies the address is currently an agent
+    /// 3. Sets the mapping flag to false and removes from the agents array
+    /// 4. Replaces the removed agent with the last agent in the array and pops the array
     function _removePolicyAgent(uint64 policyID, address agent) internal {
         uint256 agentCount = s_policyAgents[policyID].length;
 
@@ -945,10 +913,8 @@ abstract contract Policies is AtomicUnstakePool {
         }
     }
 
-    /**
-     * @dev Reverts if policy is not active
-     * @param policyID The ID of the policy to check
-     */
+    /// @dev Reverts if policy is not active
+    /// @param policyID The ID of the policy to check
     function _onlyActivePolicy(uint64 policyID) internal view {
         require(s_policies[policyID].active, PolicyInactive(policyID));
     }
@@ -957,10 +923,8 @@ abstract contract Policies is AtomicUnstakePool {
     //                     Modifiers                 //
     // --------------------------------------------- //
 
-    /**
-     * @dev Modifier that reverts if the policy is not active
-     * @param policyID The ID of the policy to check
-     */
+    /// @dev Modifier that reverts if the policy is not active
+    /// @param policyID The ID of the policy to check
     modifier onlyActivePolicy(uint64 policyID) {
         _onlyActivePolicy(policyID);
         _;

@@ -110,6 +110,10 @@ abstract contract ShMonadStorage is ShMonadErrors, ShMonadEvents, IShMonad {
     uint64 internal transient t_validatorActiveSetCheckValId;
     bool internal transient t_validatorActiveSetCheckValIdState;
 
+    // Added in 2.1
+    StakingEscrow internal s_globalPendingLast;
+    WorkingCapital internal s_globalCapitalLast;
+
     constructor() {
         STAKING_WITHDRAWAL_DELAY = uint40(WITHDRAWAL_DELAY);
     }
