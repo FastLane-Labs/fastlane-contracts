@@ -354,6 +354,9 @@ interface IShMonad is IERC4626Custom, IERC20Full {
 
     function setClosedStatus(bool isClosed) external;
 
+    function processCoinbaseByAuth(uint64 validatorId) external;
+    function processCoinbaseByAuth(address coinbase) external;
+
     function claimOwnerCommissionAsShares(uint256 assets, address receiver) external returns (uint256 sharesMinted);
 
     // --------------------------------------------- //

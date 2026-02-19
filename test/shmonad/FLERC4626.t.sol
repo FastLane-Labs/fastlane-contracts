@@ -52,103 +52,82 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         vm.deal(deployer, INITIAL_BALANCE);
         vm.deal(charlie, INITIAL_BALANCE);
 
+        // Default coinbase to the "pool/unknown" path for deterministic event expectations.
+        // Individual tests can override this when they explicitly want validator attribution.
+        vm.coinbase(address(0));
+
         shmonad = TestShMonad(payable(address(shMonad)));
+    }
+
+    function _assetsForBoostFromShares(uint256 shares) internal view returns (uint256 assets) {
+        // Keep expectations aligned with `FLERC4626.boostYield(shares, ...)`, which uses:
+        // `_convertToAssets(..., deductRecentRevenue: false, rounding: Floor)`.
+        uint256 totalAssets = shmonad.exposeTotalAssets(false);
+        uint256 supply = shmonad.totalSupply();
+        if (supply == 0) return 0;
+        assets = Math.mulDiv(shares, totalAssets, supply);
     }
 
     // ------------------------------------------------------------ //
     // boostYield(shares, from, originator) - accounting branches   //
     // ------------------------------------------------------------ //
-
     // Scenario: Sender burns their own shares; active validator attribution; no commission; no clamp.
     // Expectation:
     // - Global earnedRevenue increases by full asset value of burned shares
     // - Active validator current earnedRevenue increases by same amount
     // - Unknown validator bucket unchanged; commission bucket unchanged
     function test_FLERC4626_boostYieldFromShares_self_active_noCommission_noClamp() public {
-        // Ensure commission is disabled (exercise commission==0 path)
+        // Ensure commission is disabled (exercise commission==0 path).
         vm.prank(deployer);
         shmonad.updateBoostCommission(0);
 
-        // Register and activate a validator; set the block coinbase so attribution is to this validator
+        // Register and activate a validator; set the block coinbase so attribution is to this validator.
         address validator = _ensureActiveValidator(address(0), "val-active-nc");
         vm.coinbase(validator);
 
-        // Fund and deposit so share<->asset rate is ~1:1
+        // Deposit so share<->asset rate is ~1:1.
         uint256 depositAmount = 10 ether;
         vm.deal(alice, depositAmount);
         vm.prank(alice);
         uint256 minted = shmonad.deposit{ value: depositAmount }(depositAmount, alice);
 
-        // Move equity fully into atomic pool so available >= any reasonable burn here (no clamp)
-        _ensureNoStakedFunds();
+        // Move equity fully into atomic pool so available >= any reasonable burn here (no clamp).
+        this._ensureNoStakedFundsExternal();
 
-        // Baselines for earnedRevenue
-        (, uint120 globalEarnedBefore) = shmonad.exposeGlobalRevenueCurrent();
-        ( , uint120 activeEarnedBefore) = shmonad.exposeValidatorRewardsCurrent(validator);
-        (, uint120 unknownEarnedBefore) = shmonad.exposeValidatorRewardsCurrent(address(0));
-
-        // Burn a subset of Alice's shares to boost yield from shares
         uint256 sharesToBurn = minted / 4; // 25%
-        uint256 expectedAssetValue = shmonad.convertToAssets(sharesToBurn);
-        uint256 supplyBefore = shmonad.totalSupply();
-        // Track atomic capital and cash flows before to assert deltas
-        (uint128 allocatedBeforeAtomic, uint128 distributedBeforeAtomic) = shmonad.exposeGlobalAtomicCapital();
-        (uint120 qToStakeBefore, uint120 qForUnstakeBefore) = shmonad.exposeGlobalAssetsCurrent();
-        (uint128 stakedBefore, uint128 reservedBefore) = shmonad.exposeGlobalCapitalRaw();
-        uint256 equityBefore = shmonad.exposeTotalAssets(false);
-        uint256 R0Before = shmonad.getCurrentLiquidity();
+        uint256 expectedAssetValue = _assetsForBoostFromShares(sharesToBurn);
 
-        // Execute and assert event
+        uint256 ownerZeroYieldBefore = shmonad.balanceOfZeroYieldTranche(OWNER_COMMISSION_ACCOUNT);
+        this._snapshotActiveBoostNoCommissionBaselineToStorageExternal(validator);
+        uint256 expectedBoostAmount = expectedAssetValue;
+        if (!useLocalMode) {
+            uint256 atomicLiquidityAvailable =
+                uint256(t_allocatedAtomicBefore) - uint256(t_distributedAtomicBefore);
+            if (atomicLiquidityAvailable < expectedBoostAmount) {
+                expectedBoostAmount = atomicLiquidityAvailable;
+            }
+        }
+
         vm.startPrank(alice);
         vm.expectEmit(true, true, true, true, address(shMonad));
         emit BoostYield(alice, bob, 0, expectedAssetValue, true);
         shmonad.boostYield(sharesToBurn, alice, bob);
         vm.stopPrank();
 
-        // Supply/accounting assertions
         assertEq(shmonad.balanceOf(alice), minted - sharesToBurn, "Alice shares must decrease by burned amount");
-        assertEq(shmonad.totalSupply(), supplyBefore - sharesToBurn, "Total supply must decrease by burned shares delta");
-
-        // Earned revenue increases only in active validator bucket and global
-        (, uint120 globalEarnedAfter) = shmonad.exposeGlobalRevenueCurrent();
-        ( , uint120 activeEarnedAfter) = shmonad.exposeValidatorRewardsCurrent(validator);
-        (, uint120 unknownEarnedAfter) = shmonad.exposeValidatorRewardsCurrent(address(0));
-        assertEq(uint256(globalEarnedAfter - globalEarnedBefore), expectedAssetValue, "Global earnedRevenue should increase by full asset value");
-        assertEq(uint256(activeEarnedAfter - activeEarnedBefore), expectedAssetValue, "Active validator earnedRevenue should increase by full asset value");
-        assertEq(uint256(unknownEarnedAfter - unknownEarnedBefore), 0, "Unknown validator bucket must not change");
-
-        // Commission account should remain unchanged when commission is 0
-        uint256 ownerZeroYield = shmonad.balanceOfZeroYieldTranche(OWNER_COMMISSION_ACCOUNT);
-        assertEq(ownerZeroYield, 0, "Owner commission balance must remain zero without commission");
-
-        // Atomic pool distributed amount must increase by the full asset value (no clamp, no commission)
-        ( , uint128 distributedAfterAtomic) = shmonad.exposeGlobalAtomicCapital();
         assertEq(
-            uint256(distributedAfterAtomic - distributedBeforeAtomic),
-            expectedAssetValue,
-            "Atomic distributed must increase by asset value of burned shares"
+            shmonad.balanceOfZeroYieldTranche(OWNER_COMMISSION_ACCOUNT),
+            ownerZeroYieldBefore,
+            "Owner commission stays unchanged when disabled"
         );
-        // Allocated remains unchanged
-        (uint128 allocatedAfterAtomic, ) = shmonad.exposeGlobalAtomicCapital();
-        assertEq(allocatedAfterAtomic, allocatedBeforeAtomic, "Atomic allocated should be unchanged by boost-from-shares");
 
-        // No change in global cash flow queues from boost-from-shares
-        (uint120 qToStakeAfter, uint120 qForUnstakeAfter) = shmonad.exposeGlobalAssetsCurrent();
-        assertEq(qToStakeAfter, qToStakeBefore, "queueToStake must be unchanged on boost-from-shares");
-        assertEq(qForUnstakeAfter, qForUnstakeBefore, "queueForUnstake must be unchanged on boost-from-shares");
-
-        // No change in working capital (staked/reserved)
-        (uint128 stakedAfter, uint128 reservedAfter) = shmonad.exposeGlobalCapitalRaw();
-        assertEq(stakedAfter, stakedBefore, "Staked amount must be unchanged by boost-from-shares");
-        assertEq(reservedAfter, reservedBefore, "Reserved amount must be unchanged by boost-from-shares");
-
-        // Equity unchanged when commission is zero
-        uint256 equityAfter = shmonad.exposeTotalAssets(false);
-        assertEq(equityAfter, equityBefore, "Equity (totalAssets) should be unchanged with zero commission");
-
-        // Due to fee smoothing, available liquidity (R0) remains unchanged within the epoch
-        uint256 R0After = shmonad.getCurrentLiquidity();
-        assertEq(R0After, R0Before, "Available liquidity should be unchanged within the epoch");
+        this._assertBoostNoCommissionSupplyExternal(sharesToBurn);
+        this._assertBoostNoCommissionEarnedRevenueExternal(validator, expectedBoostAmount);
+        this._assertBoostNoCommissionAtomicExternal(expectedBoostAmount);
+        this._assertBoostNoCommissionQueuesExternal();
+        this._assertBoostNoCommissionEquityExternal();
+        this._assertBoostNoCommissionLiquidityExternal();
+        this._assertBoostNoCommissionWorkingCapitalExternal();
     }
 
     // Scenario: Sender burns their own shares; active validator attribution; commission applied; and clamp occurs.
@@ -158,103 +137,53 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
     // - Owner's zero-yield tranche increases by the commission amount
     // - Unknown validator/global buckets reflect only the clamped value and no double counting
     function test_FLERC4626_boostYieldFromShares_self_active_commission_and_clamp() public {
-        // Register and activate a validator; attribute to it
+        // Register and activate a validator; attribute to it.
         address validator = _ensureActiveValidator(address(0), "val-active-clamp");
         vm.coinbase(validator);
 
-        // Deposit and then set a small target liquidity percentage so clamp is reachable
+        // Deposit and then set a small target liquidity percentage so clamp is reachable.
         uint256 depositAmount = 10 ether;
         vm.deal(alice, depositAmount);
         vm.prank(alice);
         uint256 minted = shmonad.deposit{ value: depositAmount }(depositAmount, alice);
 
-        // Lower target liquidity to 20% and apply via crank
+        // Lower target liquidity to 20% and apply via crank.
         vm.prank(deployer);
         shmonad.setPoolTargetLiquidityPercentage(2e17); // 20%
         _advanceEpochAndCrank();
 
-        // Enable a 1% commission on boost yield from shares
+        // Enable a 1% commission on boost yield from shares.
         uint16 commissionBps = 100; // 1%
         vm.prank(deployer);
         shmonad.updateBoostCommission(commissionBps);
 
-        // Observe atomic capital to compute clamp baseline exactly as the implementation does (allocated - distributed)
-        (uint128 allocatedBefore, uint128 distributedBefore) = shmonad.exposeGlobalAtomicCapital();
-        uint256 atomicLiquidityAvailable = uint256(allocatedBefore) - uint256(distributedBefore);
-
-        // Choose a burn large enough to exceed available liquidity so clamping triggers
-        uint256 sharesToBurn = minted / 2; // ~50% of equity
-        uint256 assetsGross = shmonad.convertToAssets(sharesToBurn);
+        // Choose a burn large enough to exceed available liquidity so clamping triggers.
+        uint256 sharesToBurn = minted / 2; // ~50% of equity.
+        uint256 assetsGross = _assetsForBoostFromShares(sharesToBurn);
         uint256 commissionTaken = assetsGross * commissionBps / BPS_SCALE;
-        uint256 assetsAfterCommission = assetsGross - commissionTaken;
-        uint256 expectedRevenueIncrease = assetsAfterCommission > atomicLiquidityAvailable
-            ? atomicLiquidityAvailable
-            : assetsAfterCommission;
-        uint256 R0Before = shmonad.getCurrentLiquidity();
-        (uint128 stakedBefore, uint128 reservedBefore) = shmonad.exposeGlobalCapitalRaw();
-        uint256 equityBefore = shmonad.exposeTotalAssets(false);
-        uint256 supplyBefore = shmonad.totalSupply();
+        uint256 netAssetsAfterCommission = assetsGross - commissionTaken;
 
-        // Baselines
-        (, uint120 globalEarnedBefore) = shmonad.exposeGlobalRevenueCurrent();
-        (, uint120 activeEarnedBefore) = shmonad.exposeValidatorRewardsCurrent(validator);
-        (, uint120 unknownEarnedBefore) = shmonad.exposeValidatorRewardsCurrent(address(0));
-        uint256 ownerZeroYieldBefore = shmonad.balanceOfZeroYieldTranche(OWNER_COMMISSION_ACCOUNT);
+        // Snapshot after applying the pool target and commission config.
+        // Use external helpers to avoid via-ir stack-too-deep from large local variable counts.
+        this._snapshotActiveBoostCommissionClampBaselineToStorageExternal(validator);
 
-        // Execute
+        uint256 atomicLiquidityAvailable = uint256(t_allocatedAtomicBefore) - uint256(t_distributedAtomicBefore);
+        uint256 expectedRevenueIncrease =
+            netAssetsAfterCommission > atomicLiquidityAvailable ? atomicLiquidityAvailable : netAssetsAfterCommission;
+
         vm.prank(alice);
         vm.expectEmit(true, true, true, true, address(shMonad));
         emit BoostYield(alice, bob, 0, assetsGross, true);
         shmonad.boostYield(sharesToBurn, alice, bob);
 
-        // Check revenue attribution with clamp
-        (, uint120 globalEarnedAfter) = shmonad.exposeGlobalRevenueCurrent();
-        (, uint120 activeEarnedAfter) = shmonad.exposeValidatorRewardsCurrent(validator);
-
-        assertEq(
-            uint256(globalEarnedAfter - globalEarnedBefore),
-            expectedRevenueIncrease,
-            "Global earnedRevenue should reflect clamped, post-commission amount"
-        );
-        assertEq(
-            uint256(activeEarnedAfter - activeEarnedBefore),
-            expectedRevenueIncrease,
-            "Active validator earnedRevenue should reflect clamped, post-commission amount"
-        );
-
-        // Commission is credited as zero-yield to the owner commission account
-        uint256 ownerZeroYieldAfter = shmonad.balanceOfZeroYieldTranche(OWNER_COMMISSION_ACCOUNT);
-        assertEq(
-            ownerZeroYieldAfter - ownerZeroYieldBefore,
-            commissionTaken,
-            "Owner commission account must receive boost commission"
-        );
-
-        // Atomic pool distributed must increase by the clamped, post-commission amount
-        (uint128 allocatedAfter, uint128 distributedAfter) = shmonad.exposeGlobalAtomicCapital();
-        assertEq(
-            uint256(distributedAfter - distributedBefore),
-            expectedRevenueIncrease,
-            "Atomic distributed must increase by clamped, post-commission amount"
-        );
-        // Allocation should not change from a boost-from-shares event
-        assertEq(allocatedAfter, allocatedBefore, "Atomic allocated should be unchanged by boost-from-shares");
-
-        // Supply reduced by burned shares
-        assertEq(shmonad.totalSupply(), supplyBefore - sharesToBurn, "Total supply must decrease by burned shares");
-
-        // Due to fee smoothing, available liquidity (R0) remains unchanged within the epoch
-        uint256 R0After = shmonad.getCurrentLiquidity();
-        assertEq(R0After, R0Before, "Available liquidity should be unchanged within the epoch");
-
-        // No change in working capital (staked/reserved)
-        (uint128 stakedAfter, uint128 reservedAfter) = shmonad.exposeGlobalCapitalRaw();
-        assertEq(stakedAfter, stakedBefore, "Staked amount must be unchanged by boost-from-shares");
-        assertEq(reservedAfter, reservedBefore, "Reserved amount must be unchanged by boost-from-shares");
-
-        // Equity decreases only by commission taken
-        uint256 equityAfter = shmonad.exposeTotalAssets(false);
-        assertEq(equityBefore - equityAfter, commissionTaken, "Equity should reduce by commission only");
+        this._assertBoostNoCommissionSupplyExternal(sharesToBurn);
+        this._assertBoostCommissionClampEarnedRevenueExternal(validator, expectedRevenueIncrease);
+        this._assertBoostCommissionOwnerZeroYieldExternal(commissionTaken);
+        this._assertBoostCommissionClampAtomicExternal(expectedRevenueIncrease);
+        this._assertBoostNoCommissionQueuesExternal();
+        this._assertBoostNoCommissionLiquidityExternal();
+        this._assertBoostNoCommissionWorkingCapitalExternal();
+        this._assertBoostCommissionEquityDeltaExternal(commissionTaken);
     }
 
     // Scenario: Third party attempts to burn someone else's shares without prior approval
@@ -271,10 +200,15 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         shmonad.boostYield(sharesToBurn, alice, bob);
     }
 
+    
     // Scenario: Third party burns someone else's shares with sufficient allowance; active validator attribution
     // Expectation: Succeeds; allowance is spent; earned revenue attributed to active validator and global
     function test_FLERC4626_boostYieldFromShares_thirdPartyWithApproval_active() public {
-        // Activate validator and attribute to it via coinbase
+        // Ensure commission is disabled (exercise commission==0 path).
+        vm.prank(deployer);
+        shmonad.updateBoostCommission(0);
+
+        // Activate validator and attribute to it via coinbase.
         address validator = _ensureActiveValidator(address(0), "val-active-3p");
         vm.coinbase(validator);
 
@@ -284,69 +218,42 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         uint256 minted = shmonad.deposit{ value: depositAmount }(depositAmount, alice);
 
         uint256 sharesToBurn = minted / 3;
-        uint256 assetsExpected = shmonad.convertToAssets(sharesToBurn);
+        uint256 assetsExpected = _assetsForBoostFromShares(sharesToBurn);
 
-        // Ensure sufficient atomic liquidity so boost revenue is not clamped to zero
-        _ensureNoStakedFunds();
+        // Ensure sufficient atomic liquidity so boost revenue is not clamped.
+        this._ensureNoStakedFundsExternal();
 
-        // Approve Bob to burn on behalf of Alice
+        // Approve Bob to burn on behalf of Alice.
         vm.prank(alice);
         shmonad.approve(bob, sharesToBurn);
 
-        // Baselines
-        (, uint120 globalEarnedBefore) = shmonad.exposeGlobalRevenueCurrent();
-        (, uint120 activeEarnedBefore) = shmonad.exposeValidatorRewardsCurrent(validator);
-        (, uint120 unknownEarnedBefore) = shmonad.exposeValidatorRewardsCurrent(address(0));
-        (uint120 qToStakeBefore, uint120 qForUnstakeBefore) = shmonad.exposeGlobalAssetsCurrent();
-        (uint128 allocatedBeforeAtomic, uint128 distributedBeforeAtomic) = shmonad.exposeGlobalAtomicCapital();
-        (uint128 stakedBefore, uint128 reservedBefore) = shmonad.exposeGlobalCapitalRaw();
-        uint256 equityBefore = shmonad.exposeTotalAssets(false);
-        uint256 R0Before = shmonad.getCurrentLiquidity();
-        uint256 supplyBefore = shmonad.totalSupply();
+        this._snapshotActiveBoostNoCommissionBaselineToStorageExternal(validator);
+        uint256 expectedBoostAmount = assetsExpected;
+        if (!useLocalMode) {
+            uint256 atomicLiquidityAvailable =
+                uint256(t_allocatedAtomicBefore) - uint256(t_distributedAtomicBefore);
+            if (atomicLiquidityAvailable < expectedBoostAmount) {
+                expectedBoostAmount = atomicLiquidityAvailable;
+            }
+        }
 
-        // Track atomic distributed before
-        ( , uint128 distBefore) = shmonad.exposeGlobalAtomicCapital();
-
-        // Execute as Bob; burn Alice's shares
+        // Execute as Bob; burn Alice's shares.
         vm.prank(bob);
         vm.expectEmit(true, true, true, true, address(shMonad));
         emit BoostYield(alice, bob, 0, assetsExpected, true);
         shmonad.boostYield(sharesToBurn, alice, bob);
 
-        // Assertions
+        // Assertions (use small external calls to avoid via-ir stack-too-deep).
         assertEq(shmonad.balanceOf(alice), minted - sharesToBurn, "Alice shares reduced by third-party burn");
         assertEq(shmonad.allowance(alice, bob), 0, "Allowance should be fully spent");
-        assertEq(shmonad.totalSupply(), supplyBefore - sharesToBurn, "Total supply reduced by burned shares");
 
-        (, uint120 globalEarnedAfter) = shmonad.exposeGlobalRevenueCurrent();
-        (, uint120 activeEarnedAfter) = shmonad.exposeValidatorRewardsCurrent(validator);
-        (, uint120 unknownEarnedAfter) = shmonad.exposeValidatorRewardsCurrent(address(0));
-        assertEq(uint256(globalEarnedAfter - globalEarnedBefore), assetsExpected, "Global earnedRevenue must increase by asset value");
-        assertEq(uint256(activeEarnedAfter - activeEarnedBefore), assetsExpected, "Active validator earnedRevenue must increase by asset value");
-        assertEq(uint256(unknownEarnedAfter - unknownEarnedBefore), 0, "Unknown validator bucket must remain unchanged in active attribution path");
-
-        // Atomic pool distributed must increase by the full asset value (no commission, unclamped)
-        (uint128 allocatedAfterAtomic, uint128 distAfter) = shmonad.exposeGlobalAtomicCapital();
-        assertEq(uint256(distAfter - distBefore), assetsExpected, "Atomic distributed must increase by asset value burned");
-        assertEq(allocatedAfterAtomic, allocatedBeforeAtomic, "Atomic allocated should be unchanged by boost-from-shares");
-
-        // No change in global cash flow queues from boost-from-shares
-        (uint120 qToStakeAfter, uint120 qForUnstakeAfter) = shmonad.exposeGlobalAssetsCurrent();
-        assertEq(qToStakeAfter, qToStakeBefore, "queueToStake must be unchanged on boost-from-shares");
-        assertEq(qForUnstakeAfter, qForUnstakeBefore, "queueForUnstake must be unchanged on boost-from-shares");
-
-        // Equity unchanged when commission is zero
-        uint256 equityAfter = shmonad.exposeTotalAssets(false);
-        assertEq(equityAfter, equityBefore, "Equity (totalAssets) should be unchanged with zero commission");
-
-        // Due to fee smoothing, available liquidity (R0) remains unchanged within the epoch
-        uint256 R0After = shmonad.getCurrentLiquidity();
-        assertEq(R0After, R0Before, "Available liquidity should be unchanged within the epoch");
-
-        // No change in working capital (staked/reserved)
-        (uint128 stakedAfter, uint128 reservedAfter) = shmonad.exposeGlobalCapitalRaw();
-        assertEq(stakedAfter, stakedBefore, "Staked amount must be unchanged by boost-from-shares");
-        assertEq(reservedAfter, reservedBefore, "Reserved amount must be unchanged by boost-from-shares");
+        this._assertBoostNoCommissionSupplyExternal(sharesToBurn);
+        this._assertBoostNoCommissionEarnedRevenueExternal(validator, expectedBoostAmount);
+        this._assertBoostNoCommissionAtomicExternal(expectedBoostAmount);
+        this._assertBoostNoCommissionQueuesExternal();
+        this._assertBoostNoCommissionEquityExternal();
+        this._assertBoostNoCommissionLiquidityExternal();
+        this._assertBoostNoCommissionWorkingCapitalExternal();
     }
 
     // Scenario: Inactive/placeholder validator attribution path
@@ -355,77 +262,41 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
     // - Commission (if any) is credited to owner's zero-yield; remainder credited to UNKNOWN validator bucket only
     // - Global earnedRevenue does not increase in this path
     function test_FLERC4626_boostYieldFromShares_inactivePlaceholder_commissionOnlyToUnknown() public {
-        // Ensure coinbase maps to UNKNOWN; do not register/activate a validator for this test
+        // Ensure coinbase maps to UNKNOWN; do not register/activate a validator for this test.
         vm.coinbase(address(0));
 
-        // Configure commission at 2%
+        // Configure commission at 2%.
         uint16 commissionBps = 200;
         vm.prank(deployer);
         shmonad.updateBoostCommission(commissionBps);
 
-        // Deposit to get shares
+        // Deposit to get shares.
         uint256 depositAmount = 8 ether;
         vm.deal(alice, depositAmount);
         vm.prank(alice);
         uint256 minted = shmonad.deposit{ value: depositAmount }(depositAmount, alice);
 
-        // Baselines
-        (, uint120 globalEarnedBefore) = shmonad.exposeGlobalRevenueCurrent();
-        (, uint120 unknownEarnedBefore) = shmonad.exposeValidatorRewardsCurrent(address(0));
-        uint256 ownerZeroYieldBefore = shmonad.balanceOfZeroYieldTranche(OWNER_COMMISSION_ACCOUNT);
-        (uint128 allocatedBeforeUnknown, uint128 distributedBeforeUnknown) = shmonad.exposeGlobalAtomicCapital();
-
-        // Burn half; compute expected commission and revenue
+        // Burn half; compute expected commission and revenue.
         uint256 sharesToBurn = minted / 2;
-        uint256 assetsGross = shmonad.convertToAssets(sharesToBurn);
+        uint256 assetsGross = _assetsForBoostFromShares(sharesToBurn);
         uint256 commissionTaken = assetsGross * commissionBps / BPS_SCALE;
         uint256 expectedUnknownRevenue = assetsGross - commissionTaken;
-        (uint120 qToStakeBefore, uint120 qForUnstakeBefore) = shmonad.exposeGlobalAssetsCurrent();
-        (uint128 allocatedBeforeAtomic, uint128 distributedBeforeAtomic) = shmonad.exposeGlobalAtomicCapital();
-        (uint128 stakedBefore, uint128 reservedBefore) = shmonad.exposeGlobalCapitalRaw();
-        uint256 equityBefore = shmonad.exposeTotalAssets(false);
-        uint256 R0Before = shmonad.getCurrentLiquidity();
-        uint256 supplyBefore = shmonad.totalSupply();
+        this._snapshotActiveBoostCommissionClampBaselineToStorageExternal(address(0));
 
         vm.prank(alice);
         vm.expectEmit(true, true, true, true, address(shMonad));
         emit BoostYield(alice, bob, 0, assetsGross, true);
         shmonad.boostYield(sharesToBurn, alice, bob);
 
-        // Validate attribution
-        (, uint120 globalEarnedAfter) = shmonad.exposeGlobalRevenueCurrent();
-        (, uint120 unknownEarnedAfter) = shmonad.exposeValidatorRewardsCurrent(address(0));
-        uint256 ownerZeroYieldAfter = shmonad.balanceOfZeroYieldTranche(OWNER_COMMISSION_ACCOUNT);
-
-        assertEq(uint256(globalEarnedAfter - globalEarnedBefore), 0, "Global earnedRevenue should not increase for placeholder validator");
-        assertEq(uint256(unknownEarnedAfter - unknownEarnedBefore), expectedUnknownRevenue, "Unknown validator bucket should receive post-commission revenue");
-        assertEq(ownerZeroYieldAfter - ownerZeroYieldBefore, commissionTaken, "Owner commission credited to zero-yield tranche");
-
-        // In the placeholder attribution path, atomic distributed/allocated must not be modified
-        (uint128 allocatedAfterUnknown, uint128 distributedAfterUnknown) = shmonad.exposeGlobalAtomicCapital();
-        assertEq(allocatedAfterUnknown, allocatedBeforeUnknown, "Atomic allocated should remain unchanged for placeholder attribution");
-        assertEq(distributedAfterUnknown, distributedBeforeUnknown, "Atomic distributed should remain unchanged for placeholder attribution");
-
-        // Supply reduced by burned shares
-        assertEq(shmonad.totalSupply(), supplyBefore - sharesToBurn, "Total supply must decrease by burned shares");
-
-        // No change in global cash flow queues from boost-from-shares (placeholder path)
-        (uint120 qToStakeAfter, uint120 qForUnstakeAfter) = shmonad.exposeGlobalAssetsCurrent();
-        assertEq(qToStakeAfter, qToStakeBefore, "queueToStake must be unchanged on boost-from-shares");
-        assertEq(qForUnstakeAfter, qForUnstakeBefore, "queueForUnstake must be unchanged on boost-from-shares");
-
-        // Available liquidity remains unchanged in placeholder path
-        uint256 R0After = shmonad.getCurrentLiquidity();
-        assertEq(R0After, R0Before, "Available liquidity should be unchanged for placeholder attribution");
-
-        // No change in working capital (staked/reserved)
-        (uint128 stakedAfter, uint128 reservedAfter) = shmonad.exposeGlobalCapitalRaw();
-        assertEq(stakedAfter, stakedBefore, "Staked amount must be unchanged by boost-from-shares");
-        assertEq(reservedAfter, reservedBefore, "Reserved amount must be unchanged by boost-from-shares");
-
-        // Equity decreases only by commission taken
-        uint256 equityAfter = shmonad.exposeTotalAssets(false);
-        assertEq(equityBefore - equityAfter, commissionTaken, "Equity should reduce by commission only");
+        // Assertions (use small external calls to avoid via-ir stack-too-deep).
+        this._assertBoostNoCommissionSupplyExternal(sharesToBurn);
+        this._assertBoostPlaceholderEarnedRevenueExternal(expectedUnknownRevenue);
+        this._assertBoostCommissionOwnerZeroYieldExternal(commissionTaken);
+        this._assertBoostPlaceholderAtomicUnchangedExternal();
+        this._assertBoostNoCommissionQueuesExternal();
+        this._assertBoostNoCommissionLiquidityExternal();
+        this._assertBoostNoCommissionWorkingCapitalExternal();
+        this._assertBoostCommissionEquityDeltaExternal(commissionTaken);
     }
 
     
@@ -433,11 +304,171 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
     //                    Helpers                    //
     // --------------------------------------------- //
 
+    // Snapshot state into transient storage vars to avoid `via-ir` stack-too-deep errors
+    // from returning/passing large memory structs in tests.
+    uint120 internal t_globalEarnedBefore;
+    uint120 internal t_activeEarnedBefore;
+    uint120 internal t_unknownEarnedBefore;
+    uint128 internal t_allocatedAtomicBefore;
+    uint128 internal t_distributedAtomicBefore;
+    uint120 internal t_qToStakeBefore;
+    uint120 internal t_qForUnstakeBefore;
+    uint128 internal t_stakedBefore;
+    uint128 internal t_reservedBefore;
+    uint256 internal t_equityBefore;
+    uint256 internal t_liquidityBefore;
+    uint256 internal t_supplyBefore;
+    uint256 internal t_ownerZeroYieldBefore;
+
+    function _snapshotActiveBoostNoCommissionBaselineToStorage(address validator) internal {
+        (, t_globalEarnedBefore) = shmonad.exposeGlobalRevenueCurrent();
+        (, t_activeEarnedBefore) = shmonad.exposeValidatorRewardsCurrent(validator);
+        (, t_unknownEarnedBefore) = shmonad.exposeValidatorRewardsCurrent(address(0));
+        (t_allocatedAtomicBefore, t_distributedAtomicBefore) = shmonad.exposeGlobalAtomicCapital();
+        (t_qToStakeBefore, t_qForUnstakeBefore) = shmonad.exposeGlobalAssetsCurrent();
+        (t_stakedBefore, t_reservedBefore) = shmonad.exposeGlobalCapitalRaw();
+        t_equityBefore = shmonad.exposeTotalAssets(false);
+        t_liquidityBefore = shmonad.getCurrentLiquidity();
+        t_supplyBefore = shmonad.totalSupply();
+    }
+
+    function _snapshotActiveBoostCommissionClampBaselineToStorage(address validator) internal {
+        _snapshotActiveBoostNoCommissionBaselineToStorage(validator);
+        t_ownerZeroYieldBefore = shmonad.balanceOfZeroYieldTranche(OWNER_COMMISSION_ACCOUNT);
+    }
+
+    function _assertBoostNoCommissionSupply(uint256 sharesBurned) internal view {
+        assertEq(shmonad.totalSupply(), t_supplyBefore - sharesBurned);
+    }
+
+    function _assertBoostNoCommissionEarnedRevenue(address validator, uint256 expectedAssetValue) internal view {
+        (, uint120 globalEarnedAfter) = shmonad.exposeGlobalRevenueCurrent();
+        (, uint120 activeEarnedAfter) = shmonad.exposeValidatorRewardsCurrent(validator);
+        (, uint120 unknownEarnedAfter) = shmonad.exposeValidatorRewardsCurrent(address(0));
+
+        assertEq(uint256(globalEarnedAfter) - uint256(t_globalEarnedBefore), expectedAssetValue);
+        assertEq(uint256(activeEarnedAfter) - uint256(t_activeEarnedBefore), expectedAssetValue);
+        assertEq(uint256(unknownEarnedAfter) - uint256(t_unknownEarnedBefore), 0);
+    }
+
+    function _assertBoostNoCommissionAtomic(uint256 expectedAssetValue) internal view {
+        (uint128 allocatedAfter, uint128 distributedAfter) = shmonad.exposeGlobalAtomicCapital();
+        assertEq(uint256(distributedAfter) - uint256(t_distributedAtomicBefore), expectedAssetValue);
+        assertEq(allocatedAfter, t_allocatedAtomicBefore);
+    }
+
+    function _snapshotActiveBoostNoCommissionBaselineToStorageExternal(address validator) external {
+        _snapshotActiveBoostNoCommissionBaselineToStorage(validator);
+    }
+
+    function _snapshotActiveBoostCommissionClampBaselineToStorageExternal(address validator) external {
+        _snapshotActiveBoostCommissionClampBaselineToStorage(validator);
+    }
+
+    function _assertBoostNoCommissionSupplyExternal(uint256 sharesBurned) external view {
+        _assertBoostNoCommissionSupply(sharesBurned);
+    }
+
+    function _assertBoostNoCommissionEarnedRevenueExternal(address validator, uint256 expectedAssetValue) external view {
+        _assertBoostNoCommissionEarnedRevenue(validator, expectedAssetValue);
+    }
+
+    function _assertBoostNoCommissionAtomicExternal(uint256 expectedAssetValue) external view {
+        _assertBoostNoCommissionAtomic(expectedAssetValue);
+    }
+
+    function _assertBoostNoCommissionQueuesExternal() external view {
+        _assertBoostNoCommissionQueues();
+    }
+
+    function _assertBoostNoCommissionWorkingCapitalExternal() external view {
+        _assertBoostNoCommissionWorkingCapital();
+    }
+
+    function _assertBoostNoCommissionEquityExternal() external view {
+        _assertBoostNoCommissionEquity();
+    }
+
+    function _assertBoostNoCommissionLiquidityExternal() external view {
+        _assertBoostNoCommissionLiquidity();
+    }
+
+    function _assertBoostCommissionClampEarnedRevenueExternal(address validator, uint256 expectedRevenueIncrease) external view {
+        (, uint120 globalEarnedAfter) = shmonad.exposeGlobalRevenueCurrent();
+        (, uint120 activeEarnedAfter) = shmonad.exposeValidatorRewardsCurrent(validator);
+        (, uint120 unknownEarnedAfter) = shmonad.exposeValidatorRewardsCurrent(address(0));
+
+        assertEq(uint256(globalEarnedAfter) - uint256(t_globalEarnedBefore), expectedRevenueIncrease);
+        assertEq(uint256(activeEarnedAfter) - uint256(t_activeEarnedBefore), expectedRevenueIncrease);
+        assertEq(uint256(unknownEarnedAfter) - uint256(t_unknownEarnedBefore), 0);
+    }
+
+    function _assertBoostCommissionClampAtomicExternal(uint256 expectedRevenueIncrease) external view {
+        (uint128 allocatedAfter, uint128 distributedAfter) = shmonad.exposeGlobalAtomicCapital();
+        assertEq(uint256(distributedAfter) - uint256(t_distributedAtomicBefore), expectedRevenueIncrease);
+        assertEq(allocatedAfter, t_allocatedAtomicBefore);
+    }
+
+    function _assertBoostCommissionOwnerZeroYieldExternal(uint256 commissionTaken) external view {
+        uint256 ownerZeroYieldAfter = shmonad.balanceOfZeroYieldTranche(OWNER_COMMISSION_ACCOUNT);
+        assertEq(ownerZeroYieldAfter - t_ownerZeroYieldBefore, commissionTaken);
+    }
+
+    function _assertBoostCommissionEquityDeltaExternal(uint256 commissionTaken) external view {
+        uint256 equityAfter = shmonad.exposeTotalAssets(false);
+        assertEq(t_equityBefore - equityAfter, commissionTaken);
+    }
+
+    function _assertBoostPlaceholderEarnedRevenueExternal(uint256 expectedUnknownRevenue) external view {
+        (, uint120 globalEarnedAfter) = shmonad.exposeGlobalRevenueCurrent();
+        (, uint120 unknownEarnedAfter) = shmonad.exposeValidatorRewardsCurrent(address(0));
+
+        assertEq(uint256(globalEarnedAfter) - uint256(t_globalEarnedBefore), 0);
+        assertEq(uint256(unknownEarnedAfter) - uint256(t_unknownEarnedBefore), expectedUnknownRevenue);
+    }
+
+    function _assertBoostPlaceholderAtomicUnchangedExternal() external view {
+        (uint128 allocatedAfter, uint128 distributedAfter) = shmonad.exposeGlobalAtomicCapital();
+        assertEq(allocatedAfter, t_allocatedAtomicBefore);
+        assertEq(distributedAfter, t_distributedAtomicBefore);
+    }
+
+    function _assertBoostNoCommissionQueues() internal view {
+        (uint120 qToStakeAfter, uint120 qForUnstakeAfter) = shmonad.exposeGlobalAssetsCurrent();
+        assertEq(qToStakeAfter, t_qToStakeBefore);
+        assertEq(qForUnstakeAfter, t_qForUnstakeBefore);
+    }
+
+    function _assertBoostNoCommissionWorkingCapital() internal view {
+        (uint128 stakedAfter, uint128 reservedAfter) = shmonad.exposeGlobalCapitalRaw();
+        assertEq(stakedAfter, t_stakedBefore);
+        assertEq(reservedAfter, t_reservedBefore);
+    }
+
+    function _assertBoostNoCommissionEquity() internal view {
+        assertEq(shmonad.exposeTotalAssets(false), t_equityBefore);
+    }
+
+    function _assertBoostNoCommissionLiquidity() internal view {
+        assertEq(shmonad.getCurrentLiquidity(), t_liquidityBefore);
+    }
+
+    function _ensureNoStakedFundsExternal() external {
+        _ensureNoStakedFunds();
+    }
+
     function _ensureNoStakedFunds() internal {
-        // First, advance a few epochs under the existing target so pending queueToStake is processed.
+        // On mainnet forks, "unstake everything" is not a realistic or cheap operation.
+        // This helper exists to put the system in a predictable “fully liquid” posture for unit tests.
+        // In fork mode, we instead just ensure there's ample atomic liquidity for small test operations.
+        if (!useLocalMode) {
+            _ensureAtomicLiquidity(50 ether, SCALE, 0);
+            return;
+        }
+
+        // Local-mode: advance epochs so pending queueToStake is processed.
         for (uint256 i = 0; i < 4; i++) {
-            staking.harnessSyscallOnEpochChange(false);
-            while (!shmonad.crank()) {}
+            _advanceEpochAndCrank();
         }
 
         // Now set the pool target to 100% so all equity migrates into the atomic pool.
@@ -447,12 +478,11 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
 
         // Continue advancing epochs until all equity sits in the atomic pool.
         for (uint256 i = 0; i < 32; i++) {
-            staking.harnessSyscallOnEpochChange(false);
-            while (!shmonad.crank()) {}
+            _advanceEpochAndCrank();
 
-            uint256 totalAssets = shmonad.totalAssets();
-            uint256 currentLiquidity = shmonad.getCurrentLiquidity();
-            if (totalAssets == currentLiquidity) {
+            uint256 _totalAssets = shmonad.totalAssets();
+            uint256 _currentLiquidity = shmonad.getCurrentLiquidity();
+            if (_totalAssets == _currentLiquidity) {
                 return;
             }
         }
@@ -466,10 +496,35 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
     function _advanceEpochAndCrank() internal {
         vm.roll(block.number + UNSTAKE_BLOCK_DELAY + 1);
         staking.harnessSyscallOnEpochChange(false);
+        if (!useLocalMode) {
+            // Fork-mode optimization:
+            // `while(!crank()) {}` iterates the entire active validator set on mainnet forks (dozens of validators),
+            // which makes this file's tests painfully slow. For ERC-4626 semantics we primarily need the *global* crank
+            // effects (target liquidity updates, smoother updates, internal epoch bump) and not per-validator settlement.
+            uint64 internalEpochBefore = shmonad.getInternalEpoch();
+            for (uint256 i = 0; i < 4; i++) {
+                shmonad.harnessCrankGlobalOnly();
+                if (shmonad.getInternalEpoch() > internalEpochBefore) {
+                    return;
+                }
+            }
+            revert("fork: crank did not advance internal epoch");
+        }
+
         while (!shmonad.crank()) {}
     }
 
     function _ensureActiveValidator(address validator, string memory tag) internal returns (address) {
+        // Fork-mode: do not register new validators into the forked mainnet ShMonad / precompile mirror.
+        // Use an existing active validator from the onchain registry.
+        if (!useLocalMode) {
+            (uint64[] memory ids, address[] memory coinbases) = shmonad.listActiveValidators();
+            require(ids.length != 0, "no active validators on fork");
+            require(coinbases[0] != address(0), "active validator coinbase is zero");
+            staking.harnessSetProposerValId(ids[0]);
+            return coinbases[0];
+        }
+
         address val = validator == address(0) ? makeAddr(tag) : validator;
         vm.startPrank(deployer);
         uint64 valId = staking.registerValidator(val);
@@ -510,7 +565,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         vm.stopPrank();
 
         // Move all equity into the atomic pool so previews use a consistent (R0, L).
-        _ensureNoStakedFunds();
+        this._ensureNoStakedFundsExternal();
 
         // 1.14e32 assets target — below the inverse tail threshold.
         uint256 extremeNet = 114e30;
@@ -544,7 +599,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         shmonad.deposit{ value: seed }(seed, alice);
         vm.stopPrank();
 
-        _ensureNoStakedFunds();
+        this._ensureNoStakedFundsExternal();
 
         // Pass 1.14e32 shares so that grossAssets computed in previewRedeem is ~1.14e32 as well
         // (share<->asset rate ~1:1 after the seed deposit).
@@ -628,7 +683,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         // Calculate the expected asset value for the BoostYield event.
         // boostYield(shares) uses the gross value without applying any unstake fee,
         // so the expected amount equals convertToAssets(sharesToBurn).
-        uint256 expectedAssetValue = shmonad.convertToAssets(sharesToBurn);
+        uint256 expectedAssetValue = _assetsForBoostFromShares(sharesToBurn);
 
         vm.startPrank(alice);
         // Expect BoostYield(alice, expectedAssetValue)
@@ -652,7 +707,11 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
     }
 
     function test_FLERC4626_atomicPoolReachesFullLiquidityAfterLargeDeposit() public {
-        _ensureNoStakedFunds();
+        // This test asserts strict "fully liquid" invariants that are only true in a fresh/local deployment.
+        // On a mainnet fork, ShMonad already has large staked capital and the atomic pool won't equal totalAssets.
+        if (!useLocalMode) vm.skip(true);
+
+        this._ensureNoStakedFundsExternal();
         uint256 baselineAssets = shmonad.totalAssets();
         uint256 baselineLiquidity = shmonad.getCurrentLiquidity();
         assertEq(baselineAssets, baselineLiquidity, "baseline must be fully liquid");
@@ -662,10 +721,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         vm.prank(alice);
         shmonad.deposit{ value: smallDeposit }(smallDeposit, alice);
 
-        for (uint256 i = 0; i < 2; i++) {
-            staking.harnessSyscallOnEpochChange(false);
-            while (!shmonad.crank()) {}
-        }
+        for (uint256 i = 0; i < 2; i++) _advanceEpochAndCrank();
 
         uint256 largeDeposit = 100_000 ether;
         vm.deal(bob, largeDeposit);
@@ -676,8 +732,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         shmonad.setPoolTargetLiquidityPercentage(SCALE);
 
         for (uint256 i = 0; i < 8; i++) {
-            staking.harnessSyscallOnEpochChange(false);
-            while (!shmonad.crank()) {}
+            _advanceEpochAndCrank();
             if (shmonad.totalAssets() == shmonad.getCurrentLiquidity()) {
                 break;
             }
@@ -724,6 +779,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         uint256 R0 = shMonad.getCurrentLiquidity();
         uint256 L = shMonad.getTargetLiquidity();
         (uint256 fee, uint256 net) = FeeLib.solveNetGivenGross(gross, R0, L, p);
+        fee;
         // ERC-4626 previews ignore liquidity caps but apply fees. For L==0, treat full utilization fee.
         if (L == 0) {
             uint256 rMax = uint256(p.cRay) + uint256(p.mRay);
@@ -793,7 +849,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         shmonad.deposit{value: depositAmount}(depositAmount, alice);
         vm.stopPrank();
 
-        _ensureNoStakedFunds();
+        this._ensureNoStakedFundsExternal();
 
         uint256 withdrawAmount = 1 ether;
 
@@ -814,7 +870,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         vm.stopPrank();
 
         // 2) Ensure all equity sits in the atomic pool so maxWithdraw > 0
-        _ensureNoStakedFunds();
+        this._ensureNoStakedFundsExternal();
 
         // 3) Alice withdraws a portion; event and burn should match preview
         uint256 withdrawAssets = 4 ether;
@@ -841,26 +897,36 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         vm.prank(alice);
         uint256 minted = shmonad.deposit{ value: amount }(amount, alice);
 
-        // Ensure no staked funds so liquidity limits are not applied
-        _ensureNoStakedFunds();
-
-        // Confirm invariant for this test mode
-        assertEq(shmonad.totalAssets(), shmonad.getCurrentLiquidity());
+        // Ensure ample liquidity so maxWithdraw > 0 in fork runs.
+        this._ensureNoStakedFundsExternal();
 
         // maxDeposit/maxMint are unbounded (type(uint128).max)
         assertEq(shmonad.maxDeposit(alice), type(uint128).max);
         assertEq(shmonad.maxMint(alice), type(uint128).max);
 
-        // With no fees and no liquidity limits, maxWithdraw equals convertToAssets(balance)
+        // With no fees, the only constraint is liquidity caps.
         uint256 maxW = shmonad.maxWithdraw(alice);
-        assertEq(maxW, shmonad.convertToAssets(minted));
+        uint256 gross = shmonad.convertToAssets(minted);
+        uint256 R0 = shmonad.getCurrentLiquidity();
+        uint256 expectedMaxWithdraw = Math.min(gross, R0);
+        assertEq(maxW, expectedMaxWithdraw, "maxWithdraw should be gross capped by liquidity when fees disabled");
 
-        // maxRedeem equals balanceOf(owner)
-        assertEq(shmonad.maxRedeem(alice), shmonad.balanceOf(alice));
+        uint256 maxRedeemShares = shmonad.maxRedeem(alice);
+        if (gross <= R0) {
+            assertEq(maxRedeemShares, minted, "maxRedeem should equal balance when liquidity doesn't bind");
+        } else {
+            uint256 expectedMaxRedeem = shmonad.convertToShares(expectedMaxWithdraw);
+            assertEq(maxRedeemShares, expectedMaxRedeem, "maxRedeem should match capped gross in shares");
+        }
+        assertLe(
+            shmonad.previewRedeem(maxRedeemShares),
+            maxW,
+            "previewRedeem(maxRedeem) should not exceed maxWithdraw"
+        );
     }
 
     // Previews should never revert and ignore liquidity caps
-    function test_FLERC4626_previewsIgnoreLiquidity_largeRequests() public {
+    function test_FLERC4626_previewsIgnoreLiquidity_largeRequests() public view {
         // No deposit needed; previews must not revert
         uint256 hugeAssets = 1_000_000 ether;
         uint256 hugeShares = 1_000_000 ether;
@@ -876,7 +942,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         shmonad.deposit{ value: amount }(amount, alice);
 
         // Ensure liquidity is available so maxWithdraw > 0
-        _ensureNoStakedFunds();
+        this._ensureNoStakedFundsExternal();
 
         uint256 ask = 2 ether;
         uint256 previewShares = shmonad.previewWithdraw(ask);
@@ -893,7 +959,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         shmonad.deposit{value: depositAmount}(depositAmount, alice);
         vm.stopPrank();
 
-        _ensureNoStakedFunds();
+        this._ensureNoStakedFundsExternal();
 
         uint256 redeemShares = 1 ether;
 
@@ -914,7 +980,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         vm.stopPrank();
 
         // 2) Ensure all equity sits in the atomic pool so maxRedeem is unconstrained by liquidity
-        _ensureNoStakedFunds();
+        this._ensureNoStakedFundsExternal();
 
         // 3) Alice redeems selected shares
         uint256 shares = 3 ether;
@@ -936,7 +1002,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         shmonad.deposit{ value: amount }(amount, alice);
 
         // Ensure liquidity is available so maxRedeem > 0
-        _ensureNoStakedFunds();
+        this._ensureNoStakedFundsExternal();
 
         uint256 shares = 2 ether;
         uint256 previewAssets = shmonad.previewRedeem(shares);
@@ -956,7 +1022,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         shmonad.deposit{ value: dep }(dep, alice);
 
         // Ensure some liquidity is available to avoid zero-division paths
-        _ensureNoStakedFunds();
+        this._ensureNoStakedFundsExternal();
 
         // previewRedeemDetailed
         uint256 shares = 2 ether;
@@ -1035,7 +1101,11 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
 
         uint256 convertAfterDecay = shMonad.convertToShares(assets);
         uint256 previewAfterDecay = shMonad.previewDeposit(assets);
-        assertEq(convertAfterDecay, previewAfterDecay, "smoothing offset should fully decay after one epoch length");
+        if (useLocalMode) {
+            assertEq(convertAfterDecay, previewAfterDecay, "smoothing offset should fully decay after one epoch length");
+        } else {
+            assertApproxEqAbs(convertAfterDecay, previewAfterDecay, 2e15, "smoothing offset should decay after one epoch length");
+        }
     }
 
     // Scenario: zero target liquidity should clamp both maxWithdraw and maxRedeem to zero.
@@ -1043,6 +1113,10 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
     // 1) Deposit funds, set target liquidity to zero, and crank once.
     // 2) Assert `maxWithdraw` and `maxRedeem` both report zero while liquidity is zeroed.
     function test_FLERC4626_targetZero_clampsMaxWithdrawAndRedeemToZero() public {
+        // Fork mode runs against existing mainnet state with non-trivial atomic pool utilization.
+        // In that environment, setting a 0% target can only reduce allocated liquidity down to the utilized floor,
+        // so the "allocated == 0" assertions from local mode do not hold.
+        if (!useLocalMode) vm.skip(true);
         vm.deal(user, 10 ether);
         vm.prank(user);
         shMonad.deposit{ value: 10 ether }(10 ether, user);
@@ -1063,6 +1137,9 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
     // 1) Deposit shares, set liquidity target to zero, configure fee curve to full utilization.
     // 2) After cranking, confirm previewRedeem returns zero while gross assets remain positive.
     function test_FLERC4626_fullFeeCapAtZeroTarget_makesPreviewRedeemZero() public {
+        // Fork mode runs against existing mainnet state with non-trivial atomic pool utilization.
+        // Zeroing the target percent cannot force the pool allocation to zero, so this "zero-liquidity" test is local-only.
+        if (!useLocalMode) vm.skip(true);
         vm.deal(user, 12 ether);
         vm.prank(user);
         uint256 minted = shMonad.deposit{ value: 12 ether }(12 ether, user);
@@ -1116,7 +1193,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         uint256 userSharesSeeded = shmonad.balanceOf(user);
         require(userSharesSeeded > 0, "S1: User must hold shares before withdrawal sequence");
 
-        _ensureNoStakedFunds();
+        this._ensureNoStakedFundsExternal();
 
         vm.prank(deployer);
         shmonad.setPoolTargetLiquidityPercentage(3e17); // 30% atomic liq target
@@ -1125,7 +1202,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
 
         (uint128 allocBefore, uint128 distrBefore) = shmonad.getAtomicCapital();
         assertGt(uint256(allocBefore), 0, "S1: allocated should initialize above zero");
-        assertEq(uint256(distrBefore), 0, "S1: distributed should start at zero");
+        uint256 distrBaseline = uint256(distrBefore);
 
         // Step 2: withdraw within liquidity to set distributedAmount.
         uint256 maxBefore = shmonad.maxWithdraw(user);
@@ -1143,7 +1220,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
 
         (uint128 allocAfterFirst, uint128 distrAfterFirst) = shmonad.getAtomicCapital();
         assertEq(uint256(allocAfterFirst), uint256(allocBefore), "S2: allocated should stay constant with sufficient liquidity");
-        assertEq(uint256(distrAfterFirst), net1, "S2: distributed should equal first withdrawal");
+        assertEq(uint256(distrAfterFirst), distrBaseline + net1, "S2: distributed should include first withdrawal");
         // Ensure user retains withdraw capacity and shares after the first withdraw
         uint256 remainingMaxAfterFirst = shmonad.maxWithdraw(user);
         assertGt(remainingMaxAfterFirst, 0, "S2: user must retain withdraw capacity after first withdraw");
@@ -1215,6 +1292,63 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
             uint256(queueForUnstakeAfter),
             uint256(queueForUnstakeBeforeSecond) + expectedShortfall,
             "S4: queueForUnstake should increase by shortfall amount"
+        );
+    }
+
+    /// @notice Settles carryover using earnedRevenue minus allocatedRevenue.
+    function test_FLERC4626_carryOverAtomicUnstake_usesAvailableRevenue() public {
+        uint128 allocated = 200 ether;
+        uint128 distributed = 80 ether;
+        uint120 earnedRevenue = 100 ether;
+        uint120 allocatedRevenue = 30 ether;
+        uint120 queueForUnstakeBefore = 10 ether;
+
+        shmonad.harnessSetAtomicCapital(allocated, distributed);
+        shmonad.harnessSetGlobalRevenue(allocatedRevenue, earnedRevenue);
+        shmonad.harnessSetGlobalCashFlows(0, queueForUnstakeBefore);
+
+        shmonad.harnessCarryOverAtomicUnstakeIntoQueue();
+
+        (, uint128 distributedAfter) = shmonad.getAtomicCapital();
+        (, uint120 queueForUnstakeAfter) = shmonad.getGlobalCashFlows(0);
+
+        uint256 availableRevenue = uint256(earnedRevenue - allocatedRevenue);
+        uint256 expectedSettlement = Math.min(availableRevenue, uint256(distributed));
+
+        assertEq(
+            distributedAfter,
+            distributed - uint128(expectedSettlement),
+            "carryover should settle only available revenue"
+        );
+        assertEq(
+            queueForUnstakeAfter,
+            queueForUnstakeBefore + uint120(expectedSettlement),
+            "carryover should enqueue settled amount"
+        );
+    }
+
+    /// @notice Skips settlement when all earned revenue is already allocated.
+    function test_FLERC4626_carryOverAtomicUnstake_zeroAvailableRevenue_noSettlement() public {
+        uint128 allocated = 200 ether;
+        uint128 distributed = 40 ether;
+        uint120 earnedRevenue = 30 ether;
+        uint120 allocatedRevenue = 30 ether;
+        uint120 queueForUnstakeBefore = 12 ether;
+
+        shmonad.harnessSetAtomicCapital(allocated, distributed);
+        shmonad.harnessSetGlobalRevenue(allocatedRevenue, earnedRevenue);
+        shmonad.harnessSetGlobalCashFlows(0, queueForUnstakeBefore);
+
+        shmonad.harnessCarryOverAtomicUnstakeIntoQueue();
+
+        (, uint128 distributedAfter) = shmonad.getAtomicCapital();
+        (, uint120 queueForUnstakeAfter) = shmonad.getGlobalCashFlows(0);
+
+        assertEq(distributedAfter, distributed, "carryover should not settle with zero available revenue");
+        assertEq(
+            queueForUnstakeAfter,
+            queueForUnstakeBefore,
+            "carryover should not enqueue without available revenue"
         );
     }
 
@@ -1315,9 +1449,8 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         vm.prank(alice);
         uint256 minted = shMonad.deposit{ value: amount }(amount, alice);
 
-        // Ensure no staked funds so liquidity limits are not applied
-        _ensureNoStakedFunds();
-        assertEq(shMonad.totalAssets(), shMonad.getCurrentLiquidity());
+        // Ensure ample liquidity so maxWithdraw > 0 in fork runs.
+        this._ensureNoStakedFundsExternal();
 
         uint256 mw = shMonad.maxWithdraw(alice);
         uint256 shares = shMonad.balanceOf(alice);
@@ -1337,13 +1470,51 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         );
 
         assertEq(mw, feeLibNet, "maxWithdraw should match FeeLib net");
-        // With no liquidity limits, previewRedeem(balance) equals maxWithdraw
-        assertEq(shMonad.previewRedeem(shares), mw, "previewRedeem(balance) == maxWithdraw when unclamped");
+        // Previews ignore liquidity caps. If unclamped, previewRedeem(balance) == maxWithdraw; otherwise previewRedeem
+        // will be >= maxWithdraw.
+        if (gross <= R0) {
+            assertEq(shMonad.previewRedeem(shares), mw, "previewRedeem(balance) == maxWithdraw when unclamped");
+        } else {
+            assertGe(shMonad.previewRedeem(shares), mw, "previewRedeem ignores liquidity caps");
+        }
 
-        // maxRedeem should align with previewWithdraw(maxWithdraw) under the same fee curve
-        uint256 expectedMaxRedeem = shMonad.previewWithdraw(mw);
+        // maxRedeem should be a safe share-bound at the liquidity boundary.
         uint256 maxRedeemShares = shMonad.maxRedeem(alice);
-        assertEq(maxRedeemShares, expectedMaxRedeem, "maxRedeem should equal previewWithdraw(maxWithdraw)");
+        assertLe(maxRedeemShares, shMonad.balanceOf(alice), "maxRedeem should not exceed balance");
+        assertLe(shMonad.previewRedeem(maxRedeemShares), mw, "previewRedeem(maxRedeem) should not exceed maxWithdraw");
+    }
+
+    function test_FLERC4626_maxRedeem_roundingClampsAtLiquidityBoundary() public {
+        if (!useLocalMode) return;
+
+        vm.prank(deployer);
+        shMonad.setUnstakeFeeCurve(0, 0); // disable fees to isolate rounding
+
+        uint256 amount = 100 ether;
+        vm.prank(alice);
+        shMonad.deposit{ value: amount }(amount, alice);
+
+        uint256 burnShares = shMonad.balanceOf(alice) / 2;
+        vm.prank(alice);
+        shMonad.boostYield(burnShares, alice, alice);
+
+        vm.prank(deployer);
+        shMonad.setPoolTargetLiquidityPercentage(9e16); // 9% target liquidity
+        _advanceEpochAndCrank();
+
+        uint256 mw = shMonad.maxWithdraw(alice);
+        if (mw == 0) return;
+
+        uint256 gross = shMonad.convertToAssets(shMonad.balanceOf(alice));
+        uint256 R0 = shMonad.getCurrentLiquidity();
+        assertLt(R0, gross, "liquidity cap should bind");
+
+        uint256 oldStyleShares = shMonad.previewWithdraw(mw);
+        uint256 oldStyleNet = shMonad.previewRedeem(oldStyleShares);
+        assertGt(oldStyleNet, mw, "old maxRedeem rounding would overshoot liquidity");
+
+        uint256 maxRedeemShares = shMonad.maxRedeem(alice);
+        assertLe(shMonad.previewRedeem(maxRedeemShares), mw, "maxRedeem must stay within liquidity cap");
     }
 
     // Max enforcement: withdraw exceeding max should revert with custom error
@@ -1369,7 +1540,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
     function test_FLERC4626_redeem_exceedsMax_reverts() public {
         uint256 amount = 12 ether;
         vm.prank(alice);
-        uint256 minted = shmonad.deposit{ value: amount }(amount, alice);
+        shmonad.deposit{ value: amount }(amount, alice);
 
         uint256 mr = shmonad.maxRedeem(alice);
         uint256 balanceShares = shmonad.balanceOf(alice);
@@ -1423,7 +1594,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         vm.prank(alice);
         uint256 minted = shmonad.deposit{value: 1}(1, alice);
 
-        _ensureNoStakedFunds(); // ensures nothing is staked; allocation for atomic pool is still zero
+        this._ensureNoStakedFundsExternal(); // ensures nothing is staked; allocation for atomic pool is still zero
 
         // Previews ignore liquidity limits (ERC-4626), may show >0
         uint256 previewNet = shmonad.previewRedeem(minted);
@@ -1547,14 +1718,15 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
             shmonad.getTargetLiquidity(),
             p
         );
+        feeF;
         uint256 expectedNet = netF > R0 ? R0 : netF;
         assertEq(mw, expectedNet);
         // Previews ignore liquidity limits: previewRedeem(balance) should be >= maxWithdraw
         assertGe(shmonad.previewRedeem(shares), mw);
 
-        uint256 expectedMaxRedeem = shmonad.previewWithdraw(mw);
         uint256 maxRedeemShares = shmonad.maxRedeem(alice);
-        assertEq(maxRedeemShares, expectedMaxRedeem);
+        assertLe(maxRedeemShares, shmonad.balanceOf(alice), "maxRedeem should not exceed balance");
+        assertLe(shmonad.previewRedeem(maxRedeemShares), mw, "previewRedeem(maxRedeem) should not exceed maxWithdraw");
     }
 
     // Liquidity clamp: staking out of pool should reduce currentLiq and clamp maxWithdraw accordingly
@@ -1578,17 +1750,19 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         (uint256 mRay, uint256 cRay) = shmonad.getFeeCurveParams();
         FeeParams memory p = FeeParams({ mRay: uint128(mRay), cRay: uint128(cRay) });
         uint256 R0 = shmonad.getCurrentLiquidity();
-        uint256 L = shmonad.getTargetLiquidity();
         (uint256 feeF, uint256 netF) = FeeLib.solveNetGivenGross(
             gross,        // NOTE: not min(gross, R0)
             R0,
             shmonad.getTargetLiquidity(),
             p
         );
+        feeF;
         uint256 expectedNet = netF > R0 ? R0 : netF;
         uint256 mw = shmonad.maxWithdraw(alice);
         assertEq(mw, expectedNet, "maxWithdraw reflects clamp and fee");
-        assertEq(shmonad.maxRedeem(alice), shmonad.previewWithdraw(mw), "maxRedeem = previewWithdraw(maxWithdraw)");
+        uint256 maxRedeemShares = shmonad.maxRedeem(alice);
+        assertLe(maxRedeemShares, shmonad.balanceOf(alice), "maxRedeem <= balance");
+        assertLe(shmonad.previewRedeem(maxRedeemShares), mw, "previewRedeem(maxRedeem) <= maxWithdraw");
 
         // Withdrawing max should succeed and burn previewed shares
         if (mw > 0) {
@@ -1660,7 +1834,7 @@ contract FLERC4626Test is BaseTest, ShMonadEvents {
         shMonad.deposit{ value: 5 ether }(5 ether, address(recv));
 
         // Ensure liquidity available so withdraw won’t be clamped to zero
-        _ensureNoStakedFunds();
+        this._ensureNoStakedFundsExternal();
 
         // Perform withdraw which triggers reentrancy attempt in fallback
         uint256 ask = 1 ether;

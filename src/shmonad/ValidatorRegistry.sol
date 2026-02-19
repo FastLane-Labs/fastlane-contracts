@@ -75,6 +75,9 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
 
     // Queue up a deactivation
     // NOTE: Takes 5 epochs to complete
+    // NOTE: Deactivation immediately flags the validator as inactive for reward settlement, so any unpaid
+    // rewards (including those earned earlier in the current epoch) are redirected to shMON yield.
+    /// @custom:selector 0x8f289544
     function deactivateValidator(uint64 validatorId) external virtual onlyOwner {
         _beginDeactivatingValidator(validatorId);
     }
@@ -83,42 +86,139 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
     /// @dev Validates existence via precompile (except UNKNOWN placeholder during init).
     /// Inserts at tail of the crank linked list; enforces one id ↔ one coinbase mapping.
     /// Reverts if attempting to reuse sentinel addresses or if validator not fully removed.
+    /// @custom:selector 0xb5965470
     function addValidator(uint64 validatorId, address coinbase) external virtual onlyOwner {
         require(validatorId != UNKNOWN_VAL_ID, InvalidValidatorId(validatorId));
+
+        // NOTE: We want to avoid scenarios where a validator has their own custom smart contract
+        // as the coinbase with unknown code being run when 'process()' is called. We can check
+        // at crank time that the bytecode isn't 7702-enabled, it must be manually verified offchain
+        // that the coinbase is a wallet with a known private key and not an undeployed create2
+        // smart contract.
+        require(coinbase.code.length == 0, CustomCoinbaseCantBeContract(validatorId));
         _addValidator(validatorId, coinbase);
     }
 
+    /// @custom:selector 0xb5965470
     function addValidator(uint64 validatorId) external virtual onlyOwner returns (address coinbase) {
         require(validatorId != UNKNOWN_VAL_ID, InvalidValidatorId(validatorId));
         coinbase = _deployOrGetCoinbaseContractAddress(validatorId);
         _addValidator(validatorId, coinbase);
     }
 
+    /// @notice Deploys and links a fresh Coinbase contract for an existing validator.
+    /// @dev `nonReentrant` prevents the previous coinbase's `process()` callback from reentering
+    /// while registry links are being migrated.
+    /// @custom:selector 0x0c017712
+    function updateCoinbaseForExistingValidator(uint64 validatorId)
+        external
+        virtual
+        nonReentrant
+        onlyOwner
+        returns (address newCoinbase)
+    {
+        require(validatorId != UNKNOWN_VAL_ID, InvalidValidatorId(validatorId));
+        address _previousCoinbase = s_valCoinbases[validatorId];
+
+        // Get the new coinbase address
+        newCoinbase = _deployOrGetCoinbaseContractAddress(validatorId);
+
+        // Verify this is a net new deployment
+        require(_previousCoinbase != newCoinbase, CoinbaseAlreadyDeployed(validatorId, newCoinbase));
+        require(newCoinbase != address(0), ZeroAddress());
+
+        // Clear out any pending balances / rewards on the old contract, if it exists
+        if (_previousCoinbase.code.length > 0 && _previousCoinbase.balance > 0) {
+            _settleCoinbaseContract(validatorId, _previousCoinbase);
+        }
+
+        // Unlink the previous coinbase address if it exists and then link the new one
+        _unlinkValidatorCoinbase(validatorId);
+        _linkValidatorCoinbase(validatorId, newCoinbase);
+
+        emit CoinbaseContractUpdated(validatorId, _previousCoinbase, newCoinbase);
+    }
+
+    /// @custom:selector 0x9e6cb0bf
     function updateStakingCommission(uint16 feeInBps) external virtual onlyOwner {
         require(feeInBps < BPS_SCALE, CommissionMustBeBelow100Percent());
         s_admin.stakingCommission = feeInBps;
     }
 
+    /// @custom:selector 0x01b3bfa4
     function updateBoostCommission(uint16 feeInBps) external virtual onlyOwner {
         require(feeInBps < BPS_SCALE, CommissionMustBeBelow100Percent());
         s_admin.boostCommissionRate = feeInBps;
     }
 
+    /// @custom:selector 0x071c3626
     function updateIncentiveAlignmentPercentage(uint16 percentageInBps) external virtual onlyOwner {
         require(percentageInBps < BPS_SCALE, PercentageMustBeBelow100Percent());
         s_admin.incentiveAlignmentPercentage = percentageInBps;
     }
 
+    /// @custom:selector 0x84aae4c9
     function setFrozenStatus(bool isFrozen) external virtual onlyOwner {
         globalEpochPtr_N(0).frozen = isFrozen;
     }
 
+    /// @custom:selector 0xc2006eaa
     function setClosedStatus(bool isClosed) external virtual onlyOwner {
         globalEpochPtr_N(0).closed = isClosed;
     }
 
+    // ================================================== //
+    //            Coinbase Auth Functions                //
+    // ================================================== //
+
+    /// @notice Allows a validator's auth address or the ShMonad owner to process its Coinbase contract via ShMonad.
+    /// @dev Uses the same settlement path as cranking to account for donations as revenue. `nonReentrant`
+    /// blocks coinbase callbacks from reentering and mutating balances mid-settlement.
+    /// @custom:selector 0xa1b6d59b
+    function processCoinbaseByAuth(uint64 validatorId) external notWhenFrozen nonReentrant {
+        require(validatorId != 0 && validatorId != UNKNOWN_VAL_ID, InvalidValidatorId(validatorId));
+
+        address coinbase = s_valCoinbases[validatorId];
+        require(coinbase != address(0), InvalidValidatorId(validatorId));
+        require(coinbase.code.length > 0, InvalidValidatorAddress(coinbase));
+
+        address authAddress = Coinbase(payable(coinbase)).AUTH_ADDRESS();
+        require(msg.sender == authAddress || msg.sender == owner(), OnlyCoinbaseAuth(validatorId, msg.sender));
+
+        _settleCoinbaseContract(validatorId, coinbase);
+    }
+
+    /// @notice Allows the ShMonad owner to process a Coinbase contract via its address.
+    /// @dev Supports coinbases no longer registered in ShMonad. Restricted to `onlyOwner` to prevent unauthorized
+    /// processing of arbitrary coinbase addresses. `nonReentrant` blocks coinbase callbacks from reentering and
+    /// mutating balances mid-settlement.
+    /// @param coinbase The address of the Coinbase contract to process.
+    /// @custom:selector 0x41638da9
+    function processCoinbaseByAuth(address coinbase) external onlyOwner notWhenFrozen nonReentrant {
+        require(coinbase != address(0), InvalidValidatorAddress(coinbase));
+        require(coinbase.code.length > 0, InvalidValidatorAddress(coinbase));
+
+        uint64 valId;
+        try Coinbase(payable(coinbase)).VAL_ID() returns (uint64 _valId) {
+            valId = _valId;
+            require(valId != 0 && valId != UNKNOWN_VAL_ID, InvalidValidatorId(valId));
+        } catch {
+            revert InvalidValidatorAddress(coinbase);
+        }
+
+        try Coinbase(payable(coinbase)).SHMONAD() returns (address shmonad) {
+            require(shmonad == address(this), InvalidValidatorAddress(coinbase));
+        } catch {
+            revert InvalidValidatorAddress(coinbase);
+        }
+
+        _settleCoinbaseContract(valId, coinbase);
+    }
+
     function _addValidator(uint64 validatorId, address coinbase) internal {
         require(validatorId != 0, InvalidValidatorId(validatorId));
+        // Prevent registering sentinel IDs which would break the linked list
+        require(validatorId != FIRST_VAL_ID && validatorId != LAST_VAL_ID, InvalidValidatorId(validatorId));
         require(coinbase != address(0), ZeroAddress());
         require(
             !s_validatorIsActive[UNKNOWN_VAL_ID] || coinbase != UNKNOWN_VAL_ADDRESS, InvalidValidatorAddress(coinbase)
@@ -308,17 +408,12 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
     function _completeDeactivatingValidator(uint64 validatorId) internal virtual {
         require(s_validatorIsActive[validatorId], ValidatorAlreadyDeactivated());
 
-        address _coinbase = s_valCoinbases[validatorId];
-
         // validator deactivation queue takes 7 epochs
         require(!s_validatorData[validatorId].isActive, ValidatorDeactivationNotQueued());
         require(
             s_admin.internalEpoch >= s_validatorData[validatorId].epoch + SHMONAD_VALIDATOR_DEACTIVATION_PERIOD,
             ValidatorDeactivationQueuedIncomplete()
         );
-
-        // Setting this enables future reactivation
-        validatorEpochPtr_N(0, validatorId).epoch = 0;
 
         delete s_validatorIsActive[validatorId];
         _unlinkValidatorCoinbase(validatorId);
@@ -443,11 +538,13 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
 
     /// @notice Returns the deterministic Coinbase address for a validator without deploying it.
     /// @dev Reverts for invalid placeholders to mirror addValidator checks.
+    /// @custom:selector 0xa60232ad
     function previewCoinbaseAddress(uint64 validatorId) external view returns (address predicted) {
         require(validatorId != 0 && validatorId != UNKNOWN_VAL_ID, InvalidValidatorId(validatorId));
         predicted = _predictCoinbaseAddress(validatorId);
     }
 
+    /// @custom:selector 0xd3b9fd72
     function getValidatorStats(uint64 validatorId) external view returns (ValidatorStats memory stats) {
         address coinbase = s_valCoinbases[validatorId];
         stats.isActive = s_validatorData[validatorId].isActive;
@@ -466,20 +563,24 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
         stats.earnedRevenueCurrent = _rewardsCurrent.earnedRevenue;
     }
 
+    /// @custom:selector 0x0e1e8f7d
     function isValidatorActive(uint64 validatorId) external view returns (bool) {
         return s_validatorIsActive[validatorId];
     }
 
     /// @notice Mirrors precompile epoch; startBlock not provided by precompile → returns 0.
+    /// @custom:selector 0xa9fd1a8f
     function getEpochInfo() external returns (uint256 epochNumber, uint256 epochStartBlock) {
         (uint64 e,) = STAKING.getEpoch();
         return (uint256(e), 0);
     }
 
+    /// @custom:selector 0x3bbc81d1
     function getValidatorCoinbase(uint256 validatorId) external view returns (address) {
         return _validatorCoinbase(validatorId.toUint64());
     }
 
+    /// @custom:selector 0xc84fef9f
     function getValidatorIdForCoinbase(address coinbase) external view returns (uint256) {
         return s_valIdByCoinbase[coinbase];
     }
@@ -489,6 +590,7 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
     }
 
     /// @notice Returns detailed validator data (no structs) for a validatorId.
+    /// @custom:selector 0x6c91b101
     function getValidatorData(uint64 validatorId)
         external
         view
@@ -515,6 +617,7 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
     }
 
     /// @notice Returns the active validator set as parallel arrays of ids and coinbases.
+    /// @custom:selector 0xd5dc7f75
     function listActiveValidators() external view returns (uint64[] memory validatorIds, address[] memory coinbases) {
         uint256 count = s_activeValidatorCount;
         validatorIds = new uint64[](count);
@@ -537,6 +640,7 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
     }
 
     /// @notice Returns last and current epoch values for a validator.
+    /// @custom:selector 0xaeefe59d
     function getValidatorEpochs(uint64 validatorId)
         external
         view
@@ -548,6 +652,7 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
     }
 
     /// @notice Returns last and current pending escrow values for a validator.
+    /// @custom:selector 0x00601aaf
     function getValidatorPendingEscrow(uint64 validatorId)
         external
         view
@@ -564,6 +669,7 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
     }
 
     /// @notice Returns last and current rewards tracking for a validator.
+    /// @custom:selector 0x0b4c7141
     function getValidatorRewards(uint64 validatorId)
         external
         view
@@ -580,6 +686,7 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
     }
 
     /// @notice Returns crank linked-list neighbors for a validator (previous, next).
+    /// @custom:selector 0x29067fef
     function getValidatorNeighbors(uint64 validatorId) external view returns (address previous, address next) {
         uint64 prevId = s_valLinkPrevious[validatorId];
         uint64 nextId = s_valLinkNext[validatorId];
@@ -588,11 +695,13 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
     }
 
     /// @notice Returns active validator count.
+    /// @custom:selector 0x37deea70
     function getActiveValidatorCount() external view returns (uint256) {
         return s_activeValidatorCount;
     }
 
     /// @notice Returns next validator scheduled to crank.
+    /// @custom:selector 0x44390e2f
     function getNextValidatorToCrank() external view returns (address) {
         // Start from the current cursor. If we're at the FIRST sentinel,
         // peek the first node after it (which may be UNKNOWN_VAL_ID).
@@ -607,5 +716,7 @@ abstract contract ValidatorRegistry is FastLaneERC4626 {
         return s_valCoinbases[id];
     }
 
+    /// @custom:selector 0x0cb9f3ad
     function STAKING_PRECOMPILE() public pure virtual override(FastLaneERC4626) returns (IMonadStaking);
+    function _settleCoinbaseContract(uint64 valId, address coinbase) internal virtual;
 }

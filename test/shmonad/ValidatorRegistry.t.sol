@@ -4,9 +4,16 @@ pragma solidity >=0.8.28 <0.9.0;
 import { BaseTest } from "../base/BaseTest.t.sol";
 import { ShMonadErrors } from "../../src/shmonad/Errors.sol";
 import { ShMonadEvents } from "../../src/shmonad/Events.sol";
+import { Coinbase } from "../../src/shmonad/Coinbase.sol";
 import { ValidatorStats, Epoch } from "../../src/shmonad/Types.sol";
 import { TestShMonad } from "../base/helpers/TestShMonad.sol";
-import { SCALE, BPS_SCALE, UNKNOWN_VAL_ID, UNKNOWN_VAL_ADDRESS, FIRST_VAL_ID } from "../../src/shmonad/Constants.sol";
+import { SCALE, BPS_SCALE, UNKNOWN_VAL_ID, UNKNOWN_VAL_ADDRESS, FIRST_VAL_ID, LAST_VAL_ID } from "../../src/shmonad/Constants.sol";
+
+contract FakeCoinbaseInvalidValId {
+    function VAL_ID() external pure returns (uint64) {
+        return 0;
+    }
+}
 
 contract ValidatorRegistryTest is BaseTest {
     TestShMonad internal testShMonad;
@@ -14,6 +21,28 @@ contract ValidatorRegistryTest is BaseTest {
     function setUp() public override {
         super.setUp();
         testShMonad = TestShMonad(payable(address(shMonad)));
+    }
+
+    function _crankEpoch() internal {
+        staking.harnessSyscallOnEpochChange(false);
+        if (!useLocalMode) {
+            uint64 internalEpochBefore = shMonad.getInternalEpoch();
+            for (uint256 i = 0; i < 4; i++) {
+                testShMonad.harnessCrankGlobalOnly();
+                if (shMonad.getInternalEpoch() > internalEpochBefore) {
+                    return;
+                }
+            }
+            revert("fork: crank did not advance internal epoch");
+        }
+        while (!shMonad.crank()) {}
+    }
+
+    function _crankEpochForValidator(uint64 valId) internal {
+        _crankEpoch();
+        if (!useLocalMode) {
+            testShMonad.harnessCrankValidator(valId);
+        }
     }
 
     // -------------------------------------------------- //
@@ -84,16 +113,14 @@ contract ValidatorRegistryTest is BaseTest {
 
         // Advance 1 less than enough epochs and fully crank to trigger _completeDeactivatingValidator
         for (uint256 i = 0; i < 6; ++i) {
-            staking.harnessSyscallOnEpochChange(false);
-            while (!shMonad.crank()) {}
+            _crankEpochForValidator(valId);
         }
 
         assertEq(shMonad.getValidatorCoinbase(valId), coinbase, "valId -> coinbase should still be set");
         assertEq(shMonad.getValidatorIdForCoinbase(coinbase), valId, "coinbase -> valId should still be set");
 
         // Crank 1 more time to complete deactivation
-        staking.harnessSyscallOnEpochChange(false);
-        while (!shMonad.crank()) {}
+        _crankEpochForValidator(valId);
 
         // Mapping should be cleared in both directions
         assertEq(shMonad.getValidatorCoinbase(valId), address(0), "valId -> coinbase should be cleared");
@@ -126,6 +153,23 @@ contract ValidatorRegistryTest is BaseTest {
         // When the UNKNOWN placeholder is active, reusing its address should revert.
         vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.InvalidValidatorAddress.selector, UNKNOWN_VAL_ADDRESS));
         shMonad.addValidator(valId, UNKNOWN_VAL_ADDRESS);
+        vm.stopPrank();
+    }
+
+    function test_ValidatorRegistry_addValidator_revertsForFirstSentinel() public {
+        address validator = makeAddr("sentinelFirst");
+        vm.startPrank(deployer);
+        vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.InvalidValidatorId.selector, FIRST_VAL_ID));
+        shMonad.addValidator(FIRST_VAL_ID, validator);
+        vm.stopPrank();
+    }
+
+    function test_ValidatorRegistry_addValidator_revertsForLastSentinel() public {
+        address validator = makeAddr("sentinelLast");
+
+        vm.startPrank(deployer);
+        vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.InvalidValidatorId.selector, LAST_VAL_ID));
+        shMonad.addValidator(LAST_VAL_ID, validator);
         vm.stopPrank();
     }
 
@@ -163,6 +207,259 @@ contract ValidatorRegistryTest is BaseTest {
         assertFalse(epochMinusTwo.hasWithdrawal, "hasWithdrawal should default false");
         assertTrue(epochMinusOne.wasCranked, "wasCranked should default true for past epochs");
         assertTrue(epochMinusTwo.wasCranked, "wasCranked should default true for older epochs");
+    }
+
+    // -------------------------------------------------- //
+    //            processCoinbaseByAuth() Tests           //
+    // -------------------------------------------------- //
+
+    function test_ValidatorRegistry_processCoinbaseByAuth_revertsWhenFrozen() public {
+        address validatorAuth = makeAddr("processFrozenAuth");
+        uint64 valId = staking.registerValidator(validatorAuth);
+
+        vm.prank(deployer);
+        shMonad.addValidator(valId);
+
+        vm.prank(deployer);
+        shMonad.setFrozenStatus(true);
+
+        vm.prank(validatorAuth);
+        vm.expectRevert(ShMonadErrors.NotWhenFrozen.selector);
+        shMonad.processCoinbaseByAuth(valId);
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuth_revertsForInvalidValidatorIds() public {
+        vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.InvalidValidatorId.selector, uint256(0)));
+        shMonad.processCoinbaseByAuth(0);
+
+        vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.InvalidValidatorId.selector, uint256(UNKNOWN_VAL_ID)));
+        shMonad.processCoinbaseByAuth(uint64(UNKNOWN_VAL_ID));
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuth_revertsWhenValidatorNotAdded() public {
+        address validatorAuth = makeAddr("processMissingAuth");
+        uint64 valId = staking.registerValidator(validatorAuth);
+
+        vm.prank(validatorAuth);
+        vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.InvalidValidatorId.selector, uint256(valId)));
+        shMonad.processCoinbaseByAuth(valId);
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuth_revertsForNonContractCoinbase() public {
+        address validatorAuth = makeAddr("processEOAAuth");
+        address eoaCoinbase = makeAddr("processEOACoinbase");
+        uint64 valId = staking.registerValidator(validatorAuth);
+
+        vm.prank(deployer);
+        shMonad.addValidator(valId, eoaCoinbase);
+
+        vm.prank(validatorAuth);
+        vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.InvalidValidatorAddress.selector, eoaCoinbase));
+        shMonad.processCoinbaseByAuth(valId);
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuth_revertsForNonAuthCaller() public {
+        address validatorAuth = makeAddr("processAuth");
+        address attacker = makeAddr("processAttacker");
+        uint64 valId = staking.registerValidator(validatorAuth);
+
+        vm.prank(deployer);
+        shMonad.addValidator(valId);
+
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.OnlyCoinbaseAuth.selector, valId, attacker));
+        shMonad.processCoinbaseByAuth(valId);
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuth_processesCoinbase() public {
+        address validatorAuth = makeAddr("processSuccessAuth");
+        address recipient = makeAddr("processRecipient");
+        uint64 valId = staking.registerValidator(validatorAuth);
+
+        vm.prank(deployer);
+        address coinbaseAddr = shMonad.addValidator(valId);
+        Coinbase coinbase = Coinbase(payable(coinbaseAddr));
+
+        // Force all proceeds to the recipient to make the effects easy to assert.
+        vm.startPrank(validatorAuth);
+        coinbase.updatePriorityCommissionRate(SCALE);
+        coinbase.updateCommissionRecipient(recipient);
+        vm.stopPrank();
+
+        uint256 amount = 2 ether;
+        vm.deal(address(this), amount);
+        (bool ok,) = coinbaseAddr.call{ value: amount }("");
+        assertTrue(ok, "funding coinbase should succeed");
+
+        uint256 recipientBefore = recipient.balance;
+
+        vm.prank(validatorAuth);
+        shMonad.processCoinbaseByAuth(valId);
+
+        assertEq(recipient.balance - recipientBefore, amount, "commission should be paid out");
+        assertEq(coinbaseAddr.balance, 0, "coinbase balance should be cleared");
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuth_allowsOwner() public {
+        address validatorAuth = makeAddr("processOwnerAuth");
+        address recipient = makeAddr("processOwnerRecipient");
+        uint64 valId = staking.registerValidator(validatorAuth);
+
+        vm.prank(deployer);
+        address coinbaseAddr = shMonad.addValidator(valId);
+        Coinbase coinbase = Coinbase(payable(coinbaseAddr));
+
+        // Route all proceeds to the recipient so the owner-triggered process is easy to assert.
+        vm.startPrank(validatorAuth);
+        coinbase.updatePriorityCommissionRate(SCALE);
+        coinbase.updateCommissionRecipient(recipient);
+        vm.stopPrank();
+
+        uint256 amount = 1 ether;
+        vm.deal(address(this), amount);
+        (bool ok,) = coinbaseAddr.call{ value: amount }("");
+        assertTrue(ok, "funding coinbase should succeed");
+
+        uint256 recipientBefore = recipient.balance;
+
+        vm.prank(deployer);
+        shMonad.processCoinbaseByAuth(valId);
+
+        assertEq(recipient.balance - recipientBefore, amount, "commission should be paid out by owner");
+        assertEq(coinbaseAddr.balance, 0, "coinbase balance should be cleared");
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuthByAddress_revertsWhenFrozen() public {
+        address validatorAuth = makeAddr("processFrozenAuthByAddress");
+        uint64 valId = staking.registerValidator(validatorAuth);
+
+        vm.prank(deployer);
+        address coinbaseAddr = shMonad.addValidator(valId);
+
+        vm.prank(deployer);
+        shMonad.setFrozenStatus(true);
+
+        vm.prank(deployer);
+        vm.expectRevert(ShMonadErrors.NotWhenFrozen.selector);
+        shMonad.processCoinbaseByAuth(coinbaseAddr);
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuthByAddress_revertsForZeroAddress() public {
+        vm.prank(deployer);
+        vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.InvalidValidatorAddress.selector, address(0)));
+        shMonad.processCoinbaseByAuth(address(0));
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuthByAddress_revertsForNonContract() public {
+        address coinbase = makeAddr("nonContractCoinbase");
+        vm.prank(deployer);
+        vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.InvalidValidatorAddress.selector, coinbase));
+        shMonad.processCoinbaseByAuth(coinbase);
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuthByAddress_revertsForInvalidValId() public {
+        FakeCoinbaseInvalidValId fake = new FakeCoinbaseInvalidValId();
+
+        vm.prank(deployer);
+        vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.InvalidValidatorId.selector, uint256(0)));
+        shMonad.processCoinbaseByAuth(address(fake));
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuthByAddress_revertsForWrongShMonad() public {
+        // Deploy a Coinbase from this test contract to force SHMONAD != address(shMonad).
+        address validatorAuth = makeAddr("processWrongShMonadAuth");
+        uint64 valId = staking.registerValidator(validatorAuth);
+        Coinbase rogue = new Coinbase(valId);
+
+        vm.prank(deployer);
+        vm.expectRevert(abi.encodeWithSelector(ShMonadErrors.InvalidValidatorAddress.selector, address(rogue)));
+        shMonad.processCoinbaseByAuth(address(rogue));
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuthByAddress_allowsUnlinkedCoinbase() public {
+        address validatorAuth = makeAddr("processUnlinkedAuth");
+        address recipient = makeAddr("processUnlinkedRecipient");
+        uint64 valId = staking.registerValidator(validatorAuth);
+
+        vm.prank(deployer);
+        address coinbaseAddr = shMonad.addValidator(valId);
+        Coinbase coinbase = Coinbase(payable(coinbaseAddr));
+
+        vm.startPrank(validatorAuth);
+        coinbase.updatePriorityCommissionRate(SCALE);
+        coinbase.updateCommissionRecipient(recipient);
+        vm.stopPrank();
+
+        vm.prank(deployer);
+        shMonad.deactivateValidator(valId);
+
+        // Advance epochs to complete deactivation so the registry unlinks the coinbase.
+        for (uint256 i = 0; i < 7; ++i) {
+            _crankEpochForValidator(valId);
+        }
+
+        assertEq(shMonad.getValidatorCoinbase(valId), address(0), "coinbase should be unlinked");
+
+        uint256 amount = 1 ether;
+        vm.deal(address(this), amount);
+        (bool ok,) = coinbaseAddr.call{ value: amount }("");
+        assertTrue(ok, "funding coinbase should succeed");
+
+        uint256 recipientBefore = recipient.balance;
+
+        // Owner can still process unlinked coinbases by address
+        vm.prank(deployer);
+        shMonad.processCoinbaseByAuth(coinbaseAddr);
+
+        assertEq(recipient.balance - recipientBefore, amount, "commission should be paid out");
+        assertEq(coinbaseAddr.balance, 0, "coinbase balance should be cleared");
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuthByAddress_allowsOwner() public {
+        address validatorAuth = makeAddr("processOwnerByAddressAuth");
+        address recipient = makeAddr("processOwnerByAddressRecipient");
+        uint64 valId = staking.registerValidator(validatorAuth);
+
+        vm.prank(deployer);
+        address coinbaseAddr = shMonad.addValidator(valId);
+        Coinbase coinbase = Coinbase(payable(coinbaseAddr));
+
+        vm.startPrank(validatorAuth);
+        coinbase.updatePriorityCommissionRate(SCALE);
+        coinbase.updateCommissionRecipient(recipient);
+        vm.stopPrank();
+
+        uint256 amount = 1 ether;
+        vm.deal(address(this), amount);
+        (bool ok,) = coinbaseAddr.call{ value: amount }("");
+        assertTrue(ok, "funding coinbase should succeed");
+
+        uint256 recipientBefore = recipient.balance;
+
+        vm.prank(deployer);
+        shMonad.processCoinbaseByAuth(coinbaseAddr);
+
+        assertEq(recipient.balance - recipientBefore, amount, "commission should be paid out by owner");
+        assertEq(coinbaseAddr.balance, 0, "coinbase balance should be cleared");
+    }
+
+    function test_ValidatorRegistry_processCoinbaseByAuthByAddress_revertsForNonOwner() public {
+        address validatorAuth = makeAddr("processNonOwnerByAddressAuth");
+        address attacker = makeAddr("processNonOwnerAttacker");
+        uint64 valId = staking.registerValidator(validatorAuth);
+
+        vm.prank(deployer);
+        address coinbaseAddr = shMonad.addValidator(valId);
+
+        // Non-owner (including the validator's auth address) cannot call this function
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", attacker));
+        shMonad.processCoinbaseByAuth(coinbaseAddr);
+
+        // Even the validator's own auth address cannot call this function
+        vm.prank(validatorAuth);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", validatorAuth));
+        shMonad.processCoinbaseByAuth(coinbaseAddr);
     }
 
     // --------------------------------------------- //
@@ -314,7 +611,7 @@ contract ValidatorRegistryTest is BaseTest {
         assertEq(coinbases[n - 1], coinbaseC, "tail[2] coinbase should be C");
 
         // A is at the head (previous sentinel), C is at the tail (next sentinel)
-        (address prevA, address nextA) = shMonad.getValidatorNeighbors(idA);
+        (, address nextA) = shMonad.getValidatorNeighbors(idA);
         // Do not assert on prevA (there may be pre-existing validators).
         assertEq(nextA, coinbaseB, "A.next should be B");
 
@@ -322,7 +619,7 @@ contract ValidatorRegistryTest is BaseTest {
         assertEq(prevB, coinbaseA, "B.prev should be A");
         assertEq(nextB, coinbaseC, "B.next should be C");
 
-        (address prevC, address nextC) = shMonad.getValidatorNeighbors(idC);
+        (address prevC, ) = shMonad.getValidatorNeighbors(idC);
         assertEq(prevC, coinbaseB, "C.prev should be B");
         // Do not assert on nextC (tail may not be sentinel if other tests append later).
     }
@@ -330,14 +627,14 @@ contract ValidatorRegistryTest is BaseTest {
     function test_ValidatorRegistry_getNextValidatorToCrank_peeksFirstRealCoinbase() public {
         // Goal: When the internal cursor is set to the FIRST_VAL_ID sentinel, the view should
         // return the first real validator's coinbase instead of a sentinel placeholder.
-        (address coinbaseA, uint64 idA) = _addActiveValidator("firstVal");
+        _addActiveValidator("firstVal");
         _addActiveValidator("secondVal");
 
         // Put the cursor at the FIRST_VAL_ID sentinel; view should return A's coinbase
         vm.prank(deployer);
         TestShMonad(payable(address(shMonad))).harnessSetNextValidatorCursorToFirst();
 
-        (uint64[] memory ids, address[] memory coinbases) = shMonad.listActiveValidators();
+        (, address[] memory coinbases) = shMonad.listActiveValidators();
         address expectedFirst = coinbases[0];
         address nextCoinbase = shMonad.getNextValidatorToCrank();
         assertEq(nextCoinbase, expectedFirst, "next to crank should be first active validator's coinbase");

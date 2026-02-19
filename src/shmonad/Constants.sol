@@ -9,12 +9,15 @@ IMonadStaking constant STAKING = IMonadStaking(0x0000000000000000000000000000000
 // Only constants used in production code are defined here. Test-only constants remain in MockMonadStakingPrecompile.
 uint256 constant DUST_THRESHOLD = 1e9; // Minimum stake amount (1 gwei)
 uint256 constant WITHDRAWAL_DELAY = 1; // Epochs
+uint256 constant MAX_EXTERNAL_REWARD = 1_000_000 * 1e18; // Precompile upper bound for externalReward()
+uint256 constant VALIDATOR_CRANK_LIMIT = 1_500_000; // Stop loops when gasleft() drops below this
 
 address constant NATIVE_TOKEN = address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE);
 address constant OWNER_COMMISSION_ACCOUNT = address(0x1111111111111111111111111111111111111111);
 
 // Deterministic deployment salt namespace for Coinbase contracts
-uint256 constant COINBASE_PROCESS_GAS_LIMIT = 150_000;
+uint256 constant COINBASE_PROCESS_GAS_LIMIT = 175_000;
+uint256 constant COINBASE_HANDLE_MEV_GAS_LIMIT = 75_000;
 bytes32 constant COINBASE_SALT = keccak256("SHMONAD_COINBASE");
 uint256 constant TRANSFER_GAS_LIMIT = 50_000; // gas headroom for multisig recipient support
 

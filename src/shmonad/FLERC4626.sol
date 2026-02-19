@@ -42,26 +42,29 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
     //            ERC4626 Custom Functions           //
     // --------------------------------------------- //
 
-    /**
-     * @notice Boosts yield by donating native MON directly to ShMonad's unstake pool.
-     * @dev Uses `msg.value` as the donation amount and leaves the assets inside the contract as surplus yield.
-     * @param yieldOriginator Address credited in events/analytics as the source of the yield boost.
-     */
+    /// @notice Boosts yield by donating native MON directly to ShMonad's unstake pool.
+    /// @dev Uses `msg.value` as the donation amount and leaves the assets inside the contract as surplus yield.
+    /// @param yieldOriginator Address credited in events/analytics as the source of the yield boost.
+    /// @custom:selector 0x5357a136
     function boostYield(address yieldOriginator) external payable nonReentrant {
         _handleBoostYield(msg.value.toUint128());
         emit BoostYield(_msgSender(), yieldOriginator, 0, msg.value, false);
     }
 
-    /**
-     * @notice Boosts yield by burning a specific address's shMON shares and donating the underlying value.
-     * @dev Converts `shares` to MON using the current exchange rate, spending allowance if `msg.sender != from`.
-     *      The MON remains in the contract so the shares:assets ratio improves for all remaining holders.
-     * @param shares Amount of shMON to burn for the yield boost.
-     * @param from Address providing the shares that will be burned.
-     * @param yieldOriginator Address attributed as the source of the boost in emitted events.
-     */
+    /// @notice Boosts yield by burning a specific address's shMON shares and donating the underlying value.
+    /// @dev Converts `shares` to MON using the current exchange rate, spending allowance if `msg.sender != from`.
+    /// The MON remains in the contract so the shares:assets ratio improves for all remaining holders.
+    /// @param shares Amount of shMON to burn for the yield boost.
+    /// @param from Address providing the shares that will be burned.
+    /// @param yieldOriginator Address attributed as the source of the boost in emitted events.
+    /// @custom:selector 0x5357a136
     function boostYield(uint256 shares, address from, address yieldOriginator) external nonReentrant {
-        uint256 _assets = _convertToAssets(shares, Math.Rounding.Floor, false, false);
+        uint256 _assets = _convertToAssets({
+            shares: shares,
+            rounding: Math.Rounding.Floor,
+            deductRecentRevenue: false,
+            deductMsgValue: false
+        });
 
         if (from != _msgSender()) {
             _spendAllowance(from, _msgSender(), shares);
@@ -74,12 +77,11 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         // Native tokens intentionally not sent - remains in ShMonad as yield
     }
 
-    /**
-     * @notice Credits validator rewards (e.g., MEV) to StakeTracker, splitting protocol fee vs validator payout.
-     * @dev Caller must pass the validator ID for attribution; the fee portion is derived from `feeRate` (1e18 = 100%).
-     * @param validatorId The ID of the validator receiving attribution for the reward.
-     * @param feeRate The fee rate applied to the reward (scaled by 1e18).
-     */
+    /// @notice Credits validator rewards (e.g., MEV) to StakeTracker, splitting protocol fee vs validator payout.
+    /// @dev Caller must pass the validator ID for attribution; the fee portion is derived from `feeRate` (1e18 = 100%).
+    /// @param validatorId The ID of the validator receiving attribution for the reward.
+    /// @param feeRate The fee rate applied to the reward (scaled by 1e18).
+    /// @custom:selector 0xe5cdc7c7
     function sendValidatorRewards(uint64 validatorId, uint256 feeRate) external payable nonReentrant {
         require(feeRate <= SCALE, InvalidFeeRate(feeRate));
         (uint120 _validatorPayout, uint120 _feeTaken) = _handleValidatorRewards(validatorId, msg.value, feeRate);
@@ -91,9 +93,11 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
     //           ERC4626 Standard Functions          //
     // --------------------------------------------- //
 
-    /**
-     * @dev See {IERC4626-deposit}.
-     */
+    /// @dev See {IERC4626-deposit}.
+    /// @notice Non-standard: this function is `public payable` (ERC-4626 specifies `external` & non-payable).
+    /// Callers must send native MON equal to `assets` (`msg.value == assets`) or the call reverts. Integrations
+    /// using a canonical IERC4626 interface should wrap MON (e.g., WMON) or call this entrypoint with value.
+    /// @custom:selector 0x6e553f65
     function deposit(
         uint256 assets,
         address receiver
@@ -114,9 +118,25 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         return shares;
     }
 
-    /**
-     * @dev See {IERC4626-mint}.
-     */
+    /// @dev See {IERC4626-mint}.
+    ///
+    /// @notice IMPORTANT: Callers must first call `previewMint(shares)` off-chain to determine the exact
+    /// `msg.value` required. The function will revert if `msg.value` does not exactly match the calculated
+    /// asset amount based on the current exchange rate.
+    ///
+    /// The exchange rate used by `_previewMint()` depends on the current on-chain state (total assets and
+    /// total supply), so the required `msg.value` cannot be known without querying `previewMint()` first.
+    ///
+    /// Example usage:
+    /// ```
+    /// uint256 requiredAssets = vault.previewMint(desiredShares);
+    /// vault.mint{value: requiredAssets}(desiredShares, receiver);
+    /// ```
+    ///
+    /// @param shares The amount of shares to mint
+    /// @param receiver The address that will receive the minted shares
+    /// @return assets The amount of assets deposited (equal to msg.value)
+    /// @custom:selector 0x94bf804d
     function mint(
         uint256 shares,
         address receiver
@@ -141,14 +161,13 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
     //             Atomic Unstake Functions          //
     // --------------------------------------------- //
 
-    /**
-     * @dev See {IERC4626-withdraw}.
-     *
-     * NOTE: The `withdraw()` function charges a fee as it uses the AtomicUnstakePool to convert shMON to MON.
-     *       The fee is calculated based on the pool's utilization rate and the configured fee curve.
-     *       The fee is deducted from the assets before they are sent to the receiver.
-     *       To estimate the fee, use the `previewWithdraw()` function.
-     */
+    /// @dev See {IERC4626-withdraw}.
+    ///
+    /// NOTE: The `withdraw()` function charges a fee as it uses the AtomicUnstakePool to convert shMON to MON.
+    /// The fee is calculated based on the pool's utilization rate and the configured fee curve.
+    /// The fee is deducted from the assets before they are sent to the receiver.
+    /// To estimate the fee, use the `previewWithdraw()` function.
+    /// @custom:selector 0xb460af94
     function withdraw(uint256 assets, address receiver, address owner) public virtual nonReentrant returns (uint256) {
         require(receiver != address(0), ZeroAddress());
         uint256 maxAssets = maxWithdraw(owner);
@@ -163,14 +182,13 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         return shares;
     }
 
-    /**
-     * @dev Withdraws assets from the contract with slippage protection.
-     * @param assets The amount of assets to withdraw.
-     * @param receiver The address to receive the assets.
-     * @param owner The address of the owner of the shares.
-     * @param maxBurntShares The maximum amount of shares that can be burnt.
-     * @return The amount of shares withdrawn.
-     */
+    /// @dev Withdraws assets from the contract with slippage protection.
+    /// @param assets The amount of assets to withdraw.
+    /// @param receiver The address to receive the assets.
+    /// @param owner The address of the owner of the shares.
+    /// @param maxBurntShares The maximum amount of shares that can be burnt.
+    /// @return The amount of shares withdrawn.
+    /// @custom:selector 0xbe1d8e1c
     function withdrawWithSlippageProtection(
         uint256 assets,
         address receiver,
@@ -187,14 +205,13 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         return shares;
     }
 
-    /**
-     * @dev See {IERC4626-redeem}.
-     *
-     * NOTE: The `redeem()` function charges a fee as it uses the AtomicUnstakePool to convert shMON to MON.
-     *       The fee is calculated based on the pool's utilization rate and the configured fee curve.
-     *       The fee is deducted from the assets before they are sent to the receiver.
-     *       To estimate the fee, use the `previewRedeem()` function.
-     */
+    /// @dev See {IERC4626-redeem}.
+    ///
+    /// NOTE: The `redeem()` function charges a fee as it uses the AtomicUnstakePool to convert shMON to MON.
+    /// The fee is calculated based on the pool's utilization rate and the configured fee curve.
+    /// The fee is deducted from the assets before they are sent to the receiver.
+    /// To estimate the fee, use the `previewRedeem()` function.
+    /// @custom:selector 0xba087652
     function redeem(uint256 shares, address receiver, address owner) public virtual nonReentrant returns (uint256) {
         require(receiver != address(0), ZeroAddress());
         uint256 maxShares = maxRedeem(owner);
@@ -209,14 +226,13 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         return netAssets;
     }
 
-    /**
-     * @dev Redeems shares from the contract with slippage protection.
-     * @param shares The amount of shares to redeem.
-     * @param receiver The address to receive the assets.
-     * @param owner The address of the owner of the shares.
-     * @param minAssetsOut The minimum amount of assets that must be received.
-     * @return The amount of assets redeemed.
-     */
+    /// @dev Redeems shares from the contract with slippage protection.
+    /// @param shares The amount of shares to redeem.
+    /// @param receiver The address to receive the assets.
+    /// @param owner The address of the owner of the shares.
+    /// @param minAssetsOut The minimum amount of assets that must be received.
+    /// @return The amount of assets redeemed.
+    /// @custom:selector 0x421c885d
     function redeemWithSlippageProtection(
         uint256 shares,
         address receiver,
@@ -237,9 +253,7 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
     //               Internal Functions              //
     // --------------------------------------------- //
 
-    /**
-     * @dev Internal conversion function (from assets to shares) with support for rounding direction.
-     */
+    /// @dev Internal conversion function (from assets to shares) with support for rounding direction.
     function _convertToShares(
         uint256 assets,
         Math.Rounding rounding,
@@ -258,9 +272,7 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         return assets.mulDiv(_realTotalSupply() + 10 ** _decimalsOffset(), _equity + 1, rounding);
     }
 
-    /**
-     * @dev Internal conversion function (from shares to assets) with support for rounding direction.
-     */
+    /// @dev Internal conversion function (from shares to assets) with support for rounding direction.
     function _convertToAssets(
         uint256 shares,
         Math.Rounding rounding,
@@ -278,9 +290,7 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         return shares.mulDiv(_equity + 1, _realTotalSupply() + 10 ** _decimalsOffset(), rounding);
     }
 
-    /**
-     * @dev Deposit/mint common workflow.
-     */
+    /// @dev Deposit/mint common workflow.
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal virtual {
         require(assets == msg.value, IncorrectNativeTokenAmountSent());
 
@@ -292,9 +302,7 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         emit Deposit(caller, receiver, assets, shares);
     }
 
-    /**
-     * @dev Withdraw/redeem common workflow.
-     */
+    /// @dev Withdraw/redeem common workflow.
     function _withdraw(
         address caller,
         address receiver,
@@ -320,13 +328,21 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
     }
 
     function _previewDeposit(uint256 assets, bool deductMsgValue) internal view virtual returns (uint256) {
-        bool _deductRecentRevenue = false;
-        return _convertToShares(assets, Math.Rounding.Floor, _deductRecentRevenue, deductMsgValue);
+        return _convertToShares({
+            assets: assets,
+            rounding: Math.Rounding.Floor,
+            deductRecentRevenue: false,
+            deductMsgValue: deductMsgValue
+        });
     }
 
     function _previewMint(uint256 shares, bool deductMsgValue) internal view virtual returns (uint256) {
-        bool _deductRecentRevenue = false;
-        return _convertToAssets(shares, Math.Rounding.Ceil, _deductRecentRevenue, deductMsgValue);
+        return _convertToAssets({
+            shares: shares,
+            rounding: Math.Rounding.Ceil,
+            deductRecentRevenue: false,
+            deductMsgValue: deductMsgValue
+        });
     }
 
     function _decimalsOffset() internal view virtual returns (uint8) {
@@ -337,26 +353,22 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
     //                 View Functions                //
     // --------------------------------------------- //
 
-    /**
-     * @dev See {IERC4626-asset}.
-     */
+    /// @dev See {IERC4626-asset}.
+    /// @custom:selector 0x38d52e0f
     function asset() public view virtual returns (address) {
         return NATIVE_TOKEN;
     }
 
-    /**
-     * @dev Returns the real total assets attributed to real, minted shMON.
-     * NOTE: The asset balance attributed to shMON holders and excludes debts / creditor balances is called EQUITY.
-     */
+    /// @dev Returns the real total assets attributed to real, minted shMON.
+    /// NOTE: The asset balance attributed to shMON holders and excludes debts / creditor balances is called EQUITY.
+    /// @custom:selector 0x01e1d114
     function totalAssets() public view virtual returns (uint256) {
         // NOTE: Does not include MON earmarked for traditional unstaking (tracked in reservedAmount). Those funds have
         // already been deducted from total balances, so they can be excluded from ShMonad's liquid MON balance.
         return _totalEquity({ deductRecentRevenue: false });
     }
 
-    /**
-     * @dev Returns the total assets attributed to real, minted shMON. AKA equity.
-     */
+    /// @dev Returns the total assets attributed to real, minted shMON. AKA equity.
     function _totalEquity(bool deductRecentRevenue) internal view virtual override returns (uint256) {
         WorkingCapital memory _globalCapital = s_globalCapital;
         uint256 _equity = _globalCapital.totalEquity(s_globalLiabilities, s_admin, address(this).balance);
@@ -367,10 +379,8 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         return _equity;
     }
 
-    /**
-     * @dev Returns any recently-earned revenue that should not be included in totalAssets in order to mitigate the
-     *     dilutive impact of JIT LPing on unusually large revenue.
-     */
+    /// @dev Returns any recently-earned revenue that should not be included in totalAssets in order to mitigate the
+    /// dilutive impact of JIT LPing on unusually large revenue.
     function _recentRevenueOffset() internal view virtual returns (uint256) {
         RevenueSmoother memory _revenueSmoother = s_revenueSmoother;
         uint256 _blocksSinceEpochChange = block.number - uint256(_revenueSmoother.epochChangeBlockNumber);
@@ -384,81 +394,115 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         return uint256(globalRevenuePtr_N(0).earnedRevenue) + _unearnedRevenue;
     }
 
-    /**
-     * @dev See {IERC4626-convertToShares}.
-     */
+    /// @dev See {IERC4626-convertToShares}.
+    /// @custom:selector 0xc6e6f592
     function convertToShares(uint256 assets) public view virtual returns (uint256) {
         bool _deductRecentRevenue = true;
-        return _convertToShares(assets, Math.Rounding.Floor, _deductRecentRevenue, false);
+        return _convertToShares({
+            assets: assets,
+            rounding: Math.Rounding.Floor,
+            deductRecentRevenue: _deductRecentRevenue,
+            deductMsgValue: false
+        });
     }
 
-    /**
-     * @dev See {IERC4626-convertToAssets}.
-     */
+    /// @dev See {IERC4626-convertToAssets}.
+    /// @custom:selector 0x07a2d13a
     function convertToAssets(uint256 shares) public view virtual returns (uint256) {
         bool _deductRecentRevenue = true;
-        return _convertToAssets(shares, Math.Rounding.Floor, _deductRecentRevenue, false);
+        return _convertToAssets({
+            shares: shares,
+            rounding: Math.Rounding.Floor,
+            deductRecentRevenue: _deductRecentRevenue,
+            deductMsgValue: false
+        });
     }
 
-    /**
-     * @dev See {IERC4626-maxDeposit}.
-     */
+    /// @dev See {IERC4626-maxDeposit}.
+    /// @custom:selector 0x402d267d
     function maxDeposit(address) public view virtual returns (uint256) {
         return type(uint128).max;
     }
 
-    /**
-     * @dev See {IERC4626-maxMint}.
-     */
+    /// @dev See {IERC4626-maxMint}.
+    /// @custom:selector 0xc63d75b6
     function maxMint(address) public view virtual returns (uint256) {
         return type(uint128).max;
     }
 
-    /**
-     * @dev See {IERC4626-maxWithdraw}.
-     */
+    /// @dev See {IERC4626-maxWithdraw}.
+    /// @custom:selector 0xce96cb77
     function maxWithdraw(address owner) public view virtual returns (uint256) {
         uint256 _shares = balanceOf(owner);
 
         // Convert shares to assets
-        bool _deductRecentRevenue = true;
-        uint256 _assets = _convertToAssets(_shares, Math.Rounding.Floor, _deductRecentRevenue, false);
+        uint256 _assets = _convertToAssets({
+            shares: _shares,
+            rounding: Math.Rounding.Floor,
+            deductRecentRevenue: true,
+            deductMsgValue: false
+        });
 
-        // Apply AtomicUnstakePool fee to assets, based on pool utilization
-        (uint256 _grossAssetsCapped, uint256 _feeAssets) = _getGrossCappedAndFeeFromGrossAssets(_assets);
+        // Apply AtomicUnstakePool fee to assets, based on pool utilization. `revertIfNetExceedsLiquidity` is set to
+        // false because as per ERC-4626 semantics, `maxWithdraw()` should return a liquidity-aware value instead of
+        // reverting if the liquidity limit is hit.
+        (uint256 _grossAssetsCapped, uint256 _feeAssets) =
+            _getGrossCappedAndFeeFromGrossAssets({ grossRequested: _assets, revertIfNetExceedsLiquidity: false });
 
         return _grossAssetsCapped - _feeAssets;
     }
 
-    /**
-     * @dev See {IERC4626-maxRedeem}.
-     */
+    /// @dev See {IERC4626-maxRedeem}.
+    /// @custom:selector 0xd905777e
     function maxRedeem(address owner) public view virtual returns (uint256) {
-        // `maxWithdraw()` factors in fee and liquidity limits
-        uint256 maxWithdrawAssetsAfterFee = maxWithdraw(owner);
+        uint256 ownerShares = balanceOf(owner);
+        if (ownerShares == 0) return 0;
 
-        // Then, use `previewWithdraw()` to go from netAssets back to gross shares, as per ERC-4626 semantics.
-        return previewWithdraw(maxWithdrawAssetsAfterFee);
+        // Convert shares to assets
+        uint256 grossAssets = _convertToAssets({
+            shares: ownerShares,
+            rounding: Math.Rounding.Floor,
+            deductRecentRevenue: true,
+            deductMsgValue: false
+        });
+
+        // Clamp by liquidity using the same forward model as runtime withdraws.
+        (uint256 grossCapped, uint256 feeAssets) =
+            _getGrossCappedAndFeeFromGrossAssets({ grossRequested: grossAssets, revertIfNetExceedsLiquidity: false });
+
+        // If fees fully consume the capped gross, there is no redeemable net.
+        if (grossCapped <= feeAssets) return 0;
+
+        if (grossCapped == grossAssets) return ownerShares;
+
+        // Use floor so previewRedeem(maxRedeem) cannot exceed the liquidity-capped net.
+        return _convertToShares({
+            assets: grossCapped,
+            rounding: Math.Rounding.Floor,
+            deductRecentRevenue: true,
+            deductMsgValue: false
+        });
     }
 
-    /**
-     * @dev See {IERC4626-previewDeposit}.
-     */
+    /// @dev See {IERC4626-previewDeposit}.
+    /// @custom:selector 0xef8b30f7
     function previewDeposit(uint256 assets) public view virtual returns (uint256) {
-        bool _deductRecentRevenue = false;
-        return _convertToShares(assets, Math.Rounding.Floor, _deductRecentRevenue, false);
+        return _convertToShares({
+            assets: assets,
+            rounding: Math.Rounding.Floor,
+            deductRecentRevenue: false,
+            deductMsgValue: false
+        });
     }
 
-    /**
-     * @dev See {IERC4626-previewMint}.
-     */
+    /// @dev See {IERC4626-previewMint}.
+    /// @custom:selector 0xb3d7f6b9
     function previewMint(uint256 shares) public view virtual returns (uint256) {
         return _previewMint(shares, false);
     }
 
-    /**
-     * @dev See {IERC4626-previewWithdraw}.
-     */
+    /// @dev See {IERC4626-previewWithdraw}.
+    /// @custom:selector 0x0a28a477
     function previewWithdraw(uint256 assets) public view virtual returns (uint256) {
         (uint256 shares,) = _previewWithdraw(assets);
         return shares;
@@ -472,13 +516,20 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         (_beforeFeeAssets, feeAssets) = _quoteGrossAndFeeFromNetAssetsNoLiquidityLimit(assets);
 
         // Convert before-fee assets to shares
-        bool _deductRecentRevenue = true;
-        shares = _convertToShares(_beforeFeeAssets, Math.Rounding.Ceil, _deductRecentRevenue, false);
+        shares = _convertToShares({
+            assets: _beforeFeeAssets,
+            rounding: Math.Rounding.Ceil,
+            deductRecentRevenue: true,
+            deductMsgValue: false
+        });
     }
 
-    /**
-     * @dev See {IERC4626-previewRedeem}.
-     */
+    /// @dev See {IERC4626-previewRedeem}.
+    /// @notice For extremely large `shares` close to `type(uint256).max`, the internal `mulDiv` can overflow and
+    /// revert because it multiplies `shares` by current equity. This is an acknowledged deviation from the ERC-4626
+    /// requirement that preview functions MUST NOT revert; current MON supply caps make the overflow unreachable in
+    /// practice, but integrators should bound inputs defensively.
+    /// @custom:selector 0x4cdad506
     function previewRedeem(uint256 shares) public view virtual returns (uint256) {
         (uint256 netAssets,) = _previewRedeem(shares);
         return netAssets;
@@ -493,13 +544,18 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
     /// @return grossAssets Gross assets before fee
     /// @return feeAssets Fee charged based on atomic pool utilization
     /// @return netAssets Net assets received by the receiver
+    /// @custom:selector 0xcbd2d522
     function previewRedeemDetailed(uint256 shares)
         external
         view
         returns (uint256 grossAssets, uint256 feeAssets, uint256 netAssets)
     {
-        bool _deductRecentRevenue = true;
-        grossAssets = _convertToAssets(shares, Math.Rounding.Floor, _deductRecentRevenue, false);
+        grossAssets = _convertToAssets({
+            shares: shares,
+            rounding: Math.Rounding.Floor,
+            deductRecentRevenue: true,
+            deductMsgValue: false
+        });
         feeAssets = _quoteFeeFromGrossAssetsNoLiquidityLimit(grossAssets);
         netAssets = grossAssets - feeAssets;
     }
@@ -509,31 +565,43 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
     /// @return shares Shares to burn for the withdrawal
     /// @return grossAssets Gross assets before fee corresponding to `netAssets`
     /// @return feeAssets Fee charged based on atomic pool utilization
+    /// @custom:selector 0x7fbee515
     function previewWithdrawDetailed(uint256 netAssets)
         external
         view
         returns (uint256 shares, uint256 grossAssets, uint256 feeAssets)
     {
         (grossAssets, feeAssets) = _quoteGrossAndFeeFromNetAssetsNoLiquidityLimit(netAssets);
-        bool _deductRecentRevenue = true;
-        shares = _convertToShares(grossAssets, Math.Rounding.Ceil, _deductRecentRevenue, false);
+        shares = _convertToShares({
+            assets: grossAssets,
+            rounding: Math.Rounding.Ceil,
+            deductRecentRevenue: true,
+            deductMsgValue: false
+        });
     }
 
     function _previewRedeem(uint256 shares) internal view virtual returns (uint256 netAssets, uint256 feeAssets) {
         // Treat the asset value of `shares` as gross ask and run the limit-aware forward model once; use its clamped
         // net for preview.
-        bool _deductRecentRevenue = true;
-        uint256 _grossAssets = _convertToAssets(shares, Math.Rounding.Floor, _deductRecentRevenue, false);
+        uint256 _grossAssets = _convertToAssets({
+            shares: shares,
+            rounding: Math.Rounding.Floor,
+            deductRecentRevenue: true,
+            deductMsgValue: false
+        });
         feeAssets = _quoteFeeFromGrossAssetsNoLiquidityLimit(_grossAssets);
         netAssets = _grossAssets - feeAssets;
     }
 
-    /**
-     * @dev Similar to {IERC4626-previewRedeem}.
-     */
+    /// @dev Similar to {IERC4626-previewRedeem}.
+    /// @custom:selector 0x91767552
     function previewUnstake(uint256 shares) public view virtual returns (uint256) {
-        bool _deductRecentRevenue = true;
-        return _convertToAssets(shares, Math.Rounding.Floor, _deductRecentRevenue, false);
+        return _convertToAssets({
+            shares: shares,
+            rounding: Math.Rounding.Floor,
+            deductRecentRevenue: true,
+            deductMsgValue: false
+        });
     }
 
     // ================================================== //
@@ -546,7 +614,10 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
         virtual
         returns (uint256 feeAssets);
 
-    function _getGrossCappedAndFeeFromGrossAssets(uint256 grossRequested)
+    function _getGrossCappedAndFeeFromGrossAssets(
+        uint256 grossRequested,
+        bool revertIfNetExceedsLiquidity
+    )
         internal
         view
         virtual
@@ -579,5 +650,6 @@ abstract contract FastLaneERC4626 is FastLaneERC20, PrecompileHelpers, Reentranc
 
     function _beforeCompleteUnstake(uint128 amount) internal virtual;
 
+    /// @custom:selector 0x0cb9f3ad
     function STAKING_PRECOMPILE() public pure virtual override(PrecompileHelpers, IShMonad) returns (IMonadStaking);
 }

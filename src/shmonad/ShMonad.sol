@@ -10,15 +10,12 @@ import { FixedPointMathLib as Math } from "@solady/utils/FixedPointMathLib.sol";
 import { Policies } from "./Policies.sol";
 import { CommittedData, Delivery, UserUnstakeRequest, AdminValues } from "./Types.sol";
 import { EIP1967_ADMIN_SLOT, OWNER_COMMISSION_ACCOUNT } from "./Constants.sol";
-import { IShMonad } from "./interfaces/IShMonad.sol";
 import { AccountingLib } from "./libraries/AccountingLib.sol";
 
-/**
- * @title ShMonad - Liquid Staking Token on Monad
- * @notice ShMonad is an LST integrated with the FastLane ecosystem
- * @dev Extends Policies which provides ERC4626 functionality plus policy-based commitment mechanisms
- * @author FastLane Labs
- */
+/// @title ShMonad - Liquid Staking Token on Monad
+/// @notice ShMonad is an LST integrated with the FastLane ecosystem
+/// @dev Extends Policies which provides ERC4626 functionality plus policy-based commitment mechanisms
+/// @author FastLane Labs
 contract ShMonad is Policies {
     using SafeTransferLib for address;
     using SafeCast for uint256;
@@ -29,14 +26,13 @@ contract ShMonad is Policies {
         _disableInitializers();
     }
 
-    /**
-     * @notice Initializes the contract with ownership set to the deployer
-     * @dev This is part of the OpenZeppelin Upgradeable pattern
-     * @dev Protected against front-running: constructor disables initializers on implementation
-     * @dev For proxy upgrades, this must be called via ProxyAdmin.upgradeAndCall()
-     * @param deployer The address that will own the contract
-     */
-    function initialize(address deployer) public reinitializer(10) {
+    /// @notice Initializes the contract with ownership set to the deployer
+    /// @dev This is part of the OpenZeppelin Upgradeable pattern
+    /// @dev Protected against front-running: constructor disables initializers on implementation
+    /// @dev For proxy upgrades, this must be called via ProxyAdmin.upgradeAndCall()
+    /// @param deployer The address that will own the contract
+    /// @custom:selector 0xc4d66de8
+    function initialize(address deployer) public reinitializer(11) {
         // Prevent unauthorized initialization during upgrades
         // Only allow if called by current owner (for upgrades)
         address _proxyAdmin = _getProxyAdmin();
@@ -62,22 +58,21 @@ contract ShMonad is Policies {
     //                 Agent Functions               //
     // --------------------------------------------- //
 
-    /**
-     * @notice Transfers committed shares from one account to another within the same policy.
-     * @dev Implementation details:
-     *      1. Releases any holds on the source account if requested.
-     *      2. If `inUnderlying` is true, interprets `amount` as MON (post-fee, ignoring liquidity limits) and converts
-     *         to shares via `_convertToShares(amount)` semantics.
-     *      3. Updates the source account's committed balance in memory then persists to storage.
-     *      4. Updates the destination account's committed balance directly in storage.
-     *      5. Does not decrease committedTotalSupply as the value remains committed.
-     * @param policyID The ID of the policy powering the transfer.
-     * @param from The address providing the committed shares.
-     * @param to The address receiving the committed shares.
-     * @param amount The amount to transfer (shares or assets depending on `inUnderlying`).
-     * @param fromReleaseAmount Shares to release from holds before transferring.
-     * @param inUnderlying Whether `amount` is specified in MON (`true`) or shMON (`false`).
-     */
+    /// @notice Transfers committed shares from one account to another within the same policy.
+    /// @dev Implementation details:
+    /// 1. Releases any holds on the source account if requested.
+    /// 2. If `inUnderlying` is true, interprets `amount` as MON (post-fee, ignoring liquidity limits) and converts
+    /// to shares via `_convertToShares(amount)` semantics.
+    /// 3. Updates the source account's committed balance in memory then persists to storage.
+    /// 4. Updates the destination account's committed balance directly in storage.
+    /// 5. Does not decrease committedTotalSupply as the value remains committed.
+    /// @param policyID The ID of the policy powering the transfer.
+    /// @param from The address providing the committed shares.
+    /// @param to The address receiving the committed shares.
+    /// @param amount The amount to transfer (shares or assets depending on `inUnderlying`).
+    /// @param fromReleaseAmount Shares to release from holds before transferring.
+    /// @param inUnderlying Whether `amount` is specified in MON (`true`) or shMON (`false`).
+    /// @custom:selector 0x402f1cd4
     function agentTransferFromCommitted(
         uint64 policyID,
         address from,
@@ -116,22 +111,21 @@ contract ShMonad is Policies {
         emit AgentTransferFromCommitted(policyID, from, to, amount);
     }
 
-    /**
-     * @notice Transfers committed shares from an account into another account's uncommitted balance.
-     * @dev Implementation details:
-     *      1. Prevents agents from uncommitting their own balance.
-     *      2. Releases any holds on the source account if requested.
-     *      3. If `inUnderlying` is true, interprets `amount` as MON and converts to shares via `_convertToShares`.
-     *      4. Updates the source account's committed balance in memory then persists to storage.
-     *      5. Increases the destination account's uncommitted balance.
-     *      6. Decreases committedTotalSupply because value leaves the committed form.
-     * @param policyID The ID of the policy powering the transfer.
-     * @param from The address providing the committed shares.
-     * @param to The address receiving the uncommitted shares.
-     * @param amount The amount to transfer (shares or assets depending on `inUnderlying`).
-     * @param fromReleaseAmount Shares to release from holds before transferring.
-     * @param inUnderlying Whether `amount` is specified in MON (`true`) or shMON (`false`).
-     */
+    /// @notice Transfers committed shares from an account into another account's uncommitted balance.
+    /// @dev Implementation details:
+    /// 1. Prevents agents from uncommitting their own balance.
+    /// 2. Releases any holds on the source account if requested.
+    /// 3. If `inUnderlying` is true, interprets `amount` as MON and converts to shares via `_convertToShares`.
+    /// 4. Updates the source account's committed balance in memory then persists to storage.
+    /// 5. Increases the destination account's uncommitted balance.
+    /// 6. Decreases committedTotalSupply because value leaves the committed form.
+    /// @param policyID The ID of the policy powering the transfer.
+    /// @param from The address providing the committed shares.
+    /// @param to The address receiving the uncommitted shares.
+    /// @param amount The amount to transfer (shares or assets depending on `inUnderlying`).
+    /// @param fromReleaseAmount Shares to release from holds before transferring.
+    /// @param inUnderlying Whether `amount` is specified in MON (`true`) or shMON (`false`).
+    /// @custom:selector 0xbfece887
     function agentTransferToUncommitted(
         uint64 policyID,
         address from,
@@ -166,25 +160,24 @@ contract ShMonad is Policies {
         emit AgentTransferToUncommitted(policyID, from, to, amount);
     }
 
-    /**
-     * @notice Withdraws MON from an account's committed balance to a recipient.
-     * @dev Implementation details:
-     *      1. Prevents agents from withdrawing their own balance.
-     *      2. Releases any holds on the source account if requested.
-     *      3. Handles conversion between shares and assets based on the `amountSpecifiedInUnderlying` flag.
-     *      4. Updates the source account's committed balance in memory then persists to storage.
-     *      5. Temporarily increases the destination's uncommitted balance.
-     *      6. Burns the shares from the destination account.
-     *      7. Transfers the underlying assets (MON) to the destination.
-     *      NOTE: Conversions go through the AtomicUnstakePool. Fees and liquidity limits apply; agents should consult
-     *      `previewWithdraw()`/`previewRedeem()` before calling.
-     * @param policyID The ID of the policy powering the withdrawal.
-     * @param from The address providing the committed shares.
-     * @param to The address receiving the withdrawn MON.
-     * @param amount The amount to withdraw (shares or assets depending on `amountSpecifiedInUnderlying`).
-     * @param fromReleaseAmount Shares to release from holds before withdrawing.
-     * @param amountSpecifiedInUnderlying Whether `amount` is specified in MON (`true`) or shMON (`false`).
-     */
+    /// @notice Withdraws MON from an account's committed balance to a recipient.
+    /// @dev Implementation details:
+    /// 1. Prevents agents from withdrawing their own balance.
+    /// 2. Releases any holds on the source account if requested.
+    /// 3. Handles conversion between shares and assets based on the `amountSpecifiedInUnderlying` flag.
+    /// 4. Updates the source account's committed balance in memory then persists to storage.
+    /// 5. Temporarily increases the destination's uncommitted balance.
+    /// 6. Burns the shares from the destination account.
+    /// 7. Transfers the underlying assets (MON) to the destination.
+    /// NOTE: Conversions go through the AtomicUnstakePool. Fees and liquidity limits apply; agents should consult
+    /// `previewWithdraw()`/`previewRedeem()` before calling.
+    /// @param policyID The ID of the policy powering the withdrawal.
+    /// @param from The address providing the committed shares.
+    /// @param to The address receiving the withdrawn MON.
+    /// @param amount The amount to withdraw (shares or assets depending on `amountSpecifiedInUnderlying`).
+    /// @param fromReleaseAmount Shares to release from holds before withdrawing.
+    /// @param amountSpecifiedInUnderlying Whether `amount` is specified in MON (`true`) or shMON (`false`).
+    /// @custom:selector 0x74662009
     function agentWithdrawFromCommitted(
         uint64 policyID,
         address from,
@@ -218,7 +211,12 @@ contract ShMonad is Policies {
             // CASE: amount is a gross shares (shMON) figure.
             uint256 _grossAssetsWanted = _convertToAssets(amount, OZMath.Rounding.Floor, true, false);
             uint256 _grossAssetsCapped;
-            (_grossAssetsCapped, _feeTaken) = _getGrossCappedAndFeeFromGrossAssets(_grossAssetsWanted);
+
+            (_grossAssetsCapped, _feeTaken) = _getGrossCappedAndFeeFromGrossAssets({
+                grossRequested: _grossAssetsWanted,
+                revertIfNetExceedsLiquidity: true
+            });
+
             _assetsToReceive = _grossAssetsCapped - _feeTaken;
             _sharesToDeduct = amount.toUint128();
         }
@@ -243,6 +241,14 @@ contract ShMonad is Policies {
     //            Unstake Functions                  //
     // --------------------------------------------- //
 
+    /// @notice Requests an unstake of shMON shares for the caller.
+    /// @dev Burns the specified amount of shMON shares and queues the corresponding MON for withdrawal.
+    /// The unstake request may take multiple epochs to complete depending on queue capacity.
+    /// If the caller has a pending unstake request, the amounts are combined and the completion
+    /// epoch is set to the furthest of the two requests.
+    /// @param shares The amount of shMON shares to unstake.
+    /// @return completionEpoch The internal epoch at which the unstake request can be completed.
+    /// @custom:selector 0x23095721
     function requestUnstake(uint256 shares) external notWhenClosed returns (uint64 completionEpoch) {
         completionEpoch = _requestUnstake(shares);
     }
@@ -273,7 +279,8 @@ contract ShMonad is Policies {
         emit RequestUnstake(msg.sender, shares, amount, completionEpoch);
     }
 
-    function completeUnstake() external virtual notWhenClosed {
+    /// @custom:selector 0x63803b23
+    function completeUnstake() external virtual notWhenClosed nonReentrant {
         _completeUnstake(msg.sender);
     }
 
@@ -340,6 +347,7 @@ contract ShMonad is Policies {
     /// any time, via `convertZeroYieldTrancheToShMON()`.
     /// @param assets The amount of underlying assets (MON) to deposit
     /// @param receiver The address receiving the zero-yield tranche shares
+    /// @custom:selector 0x8d01c5c8
     function depositToZeroYieldTranche(uint256 assets, address receiver) external payable notWhenClosed nonReentrant {
         _depositToZeroYieldTranche(assets, msg.sender, receiver);
     }
@@ -368,6 +376,7 @@ contract ShMonad is Policies {
     /// @param assets The amount of underlying assets (MON) to convert
     /// @param receiver The address receiving the yield-bearing shMON shares
     /// @return shares The amount of yield-bearing shMON shares minted to the receiver
+    /// @custom:selector 0xbc3ec4c2
     function convertZeroYieldTrancheToShares(
         uint256 assets,
         address receiver
@@ -384,6 +393,7 @@ contract ShMonad is Policies {
     /// @param assets The amount of underlying assets (MON) to convert
     /// @param receiver The address receiving the yield-bearing shMON shares
     /// @return shares The amount of yield-bearing shMON shares minted to the receiver
+    /// @custom:selector 0x73e45bae
     function claimOwnerCommissionAsShares(
         uint256 assets,
         address receiver
@@ -436,12 +446,14 @@ contract ShMonad is Policies {
     /// @notice Returns the zero-yield tranche balance of an account
     /// @param account The account to query
     /// @return The zero-yield tranche balance of the account, in MON
+    /// @custom:selector 0x1d07c5cf
     function balanceOfZeroYieldTranche(address account) external view returns (uint256) {
         return s_zeroYieldBalances[account];
     }
 
     /// @notice Returns the unclaimed owner commission balance
     /// @return The unclaimed owner commission balance, in MON
+    /// @custom:selector 0x41faf0a7
     function unclaimedOwnerCommission() external view returns (uint256) {
         return s_zeroYieldBalances[OWNER_COMMISSION_ACCOUNT];
     }
