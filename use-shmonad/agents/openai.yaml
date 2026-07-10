@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use ShMonad"
+  short_description: "Operate the current ShMonad deployment safely"
+  default_prompt: "Use $use-shmonad to verify the current implementation and perform this ShMonad interaction safely over Monad RPC."
