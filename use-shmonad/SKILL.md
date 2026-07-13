@@ -41,7 +41,7 @@ If incompatible implementations are live on different networks during an upgrade
 
 ShMonad is an ERC-20 share token and an ERC-4626-like vault for native MON. Its standard-looking `deposit`, `mint`, `withdraw`, and `redeem` surface has native-value, liquidity, fee, and rounding behavior defined in the holder reference. ShMonad extends the base vault shape with detailed previews (`previewWithdrawDetailed`, `previewRedeemDetailed`) and bounded exits (`withdrawWithSlippageProtection`, `redeemWithSlippageProtection`). Prefer those extensions for atomic exits.
 
-The vault is not a fully standard ERC-4626 token-asset vault: `asset()` is the native-MON sentinel `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`, deposits carry native value, and a plain MON transfer to `receive()` is goodwill that mints no shares.
+The vault is not a fully standard ERC-4626 token-asset vault: `asset()` is the native-MON sentinel `0xEeee...EEeE`, deposits carry native value, and a plain MON transfer to `receive()` is treated as a donation that mints no shares.
 
 Keep units distinct:
 
