@@ -43,11 +43,7 @@ ShMonad is an ERC-20 share token and an ERC-4626-like vault for native MON. Its 
 
 The vault is not a fully standard ERC-4626 token-asset vault: `asset()` is the native-MON sentinel `0xEeee...EEeE`, deposits carry native value, and a plain MON transfer to `receive()` is treated as a donation that mints no shares.
 
-Keep units distinct:
-
-- `1 MON = 10^18 wei`.
-- `1 shMON = 10^18 share subunits`; MON value per share is live and not 1:1.
-- WAD is `1e18`, RAY is `1e27`, and basis-point, block, epoch, validator-ID, and policy-ID values are not token amounts.
+Keep MON and shMON distinct: MON is the native asset, while shMON is an 18-decimal vault share whose MON value is live and not fixed at 1:1.
 
 An account can hold shares in three mutually exclusive buckets:
 
